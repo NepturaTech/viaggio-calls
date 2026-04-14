@@ -1,0 +1,117 @@
+import logging
+from twilio.rest import Client
+from twilio.twiml.voice_response import VoiceResponse, Connect
+from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+twilio_client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+
+
+def _validate_public_base_url() -> str:
+    """Ensure Twilio callbacks point to a publicly reachable URL."""
+    base_url = settings.base_url.rstrip("/")
+    invalid_hosts = ("localhost", "127.0.0.1", "0.0.0.0")
+
+    if any(host in base_url for host in invalid_hosts):
+        raise ValueError(
+            "La configuración base_url no es pública. "
+            "Twilio no puede usar localhost/127.0.0.1/0.0.0.0 para webhooks. "
+            "Configura una URL pública HTTPS, por ejemplo con ngrok."
+        )
+
+    if not base_url.startswith(("https://", "http://")):
+        raise ValueError("La configuración base_url debe iniciar con http:// o https://")
+
+    return base_url
+
+
+def generate_conversation_relay_twiml(welcome_greeting: str = None) -> str:
+    """Generate TwiML that connects the call to ConversationRelay via WebSocket.
+
+    Args:
+        welcome_greeting: Custom greeting the bot says when answering.
+                         If None, uses a default greeting.
+    """
+    if not welcome_greeting:
+        welcome_greeting = "Hola, bienvenido. ¿Con quién tengo el gusto de hablar?"
+
+    response = VoiceResponse()
+    connect = Connect()
+    relay_kwargs = {
+        "url": f"wss://{settings.base_url.replace('https://', '').replace('http://', '')}/ws/conversation",
+        "language": settings.twilio_conversation_language,
+        "tts_provider": settings.twilio_tts_provider,
+        "transcription_provider": settings.twilio_transcription_provider,
+        "speech_model": settings.twilio_speech_model,
+        "welcome_greeting_interruptible": "any",
+        "dtmf_detection": True,
+        "interruptible": True,
+        "welcome_greeting": welcome_greeting,
+    }
+
+    if settings.twilio_tts_voice:
+        relay_kwargs["voice"] = settings.twilio_tts_voice
+    if settings.twilio_tts_model:
+        relay_kwargs["tts_model"] = settings.twilio_tts_model
+    if settings.twilio_tts_speed:
+        relay_kwargs["tts_speed"] = settings.twilio_tts_speed
+    if settings.twilio_tts_stability:
+        relay_kwargs["tts_stability"] = settings.twilio_tts_stability
+    if settings.twilio_tts_similarity_boost:
+        relay_kwargs["tts_similarity_boost"] = settings.twilio_tts_similarity_boost
+
+    connect.conversation_relay(**relay_kwargs)
+    response.append(connect)
+    return str(response)
+
+
+def generate_realtime_stream_twiml(
+    customer_phone: str,
+    customer_name: str | None,
+    direction: str,
+    welcome_greeting: str | None = None,
+) -> str:
+    """Generate TwiML that connects the call to a bidirectional media stream."""
+    response = VoiceResponse()
+    connect = response.connect()
+    stream = connect.stream(
+        url=f"wss://{settings.base_url.replace('https://', '').replace('http://', '')}/ws/realtime-media"
+    )
+    stream.parameter(name="customer_phone", value=customer_phone or "")
+    stream.parameter(name="customer_name", value=customer_name or "")
+    stream.parameter(name="direction", value=direction)
+    stream.parameter(name="project_name", value="Biomarcadores")
+    if welcome_greeting:
+        stream.parameter(name="welcome_greeting", value=welcome_greeting)
+    return str(response)
+
+
+async def make_outbound_call(to_number: str) -> str:
+    """Initiate an outbound call using Twilio."""
+    try:
+        base_url = _validate_public_base_url()
+        call = twilio_client.calls.create(
+            to=to_number,
+            from_=settings.twilio_phone_number,
+            url=f"{base_url}/twilio/voice",
+            method="POST",
+            status_callback=f"{base_url}/twilio/status",
+            status_callback_method="POST",
+            machine_detection=settings.twilio_machine_detection,
+            machine_detection_timeout=settings.twilio_machine_detection_timeout,
+            async_amd="true" if settings.twilio_async_amd else "false",
+            async_amd_status_callback=f"{base_url}/twilio/amd",
+            async_amd_status_callback_method="POST",
+        )
+        logger.info("Outbound call initiated: %s -> %s (SID: %s)", settings.twilio_phone_number, to_number, call.sid)
+        return call.sid
+    except Exception as e:
+        logger.error("Failed to make outbound call to %s: %s", to_number, e)
+        raise
+
+
+def hangup_call(call_sid: str):
+    """Force-complete a live call, useful for voicemail detection."""
+    return twilio_client.calls(call_sid).update(status="completed")
