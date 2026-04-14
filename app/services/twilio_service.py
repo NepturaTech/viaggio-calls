@@ -1,7 +1,10 @@
 import logging
+
 from twilio.rest import Client
-from twilio.twiml.voice_response import VoiceResponse, Connect
+from twilio.twiml.voice_response import Connect, VoiceResponse
+
 from app.config import get_settings
+from app.services.supabase_rest_service import get_voice_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -16,51 +19,58 @@ def _validate_public_base_url() -> str:
 
     if any(host in base_url for host in invalid_hosts):
         raise ValueError(
-            "La configuración base_url no es pública. "
+            "La configuracion base_url no es publica. "
             "Twilio no puede usar localhost/127.0.0.1/0.0.0.0 para webhooks. "
-            "Configura una URL pública HTTPS, por ejemplo con ngrok."
+            "Configura una URL publica HTTPS, por ejemplo con cloudflared o ngrok."
         )
 
     if not base_url.startswith(("https://", "http://")):
-        raise ValueError("La configuración base_url debe iniciar con http:// o https://")
+        raise ValueError("La configuracion base_url debe iniciar con http:// o https://")
 
     return base_url
 
 
-def generate_conversation_relay_twiml(welcome_greeting: str = None) -> str:
-    """Generate TwiML that connects the call to ConversationRelay via WebSocket.
-
-    Args:
-        welcome_greeting: Custom greeting the bot says when answering.
-                         If None, uses a default greeting.
-    """
+def generate_conversation_relay_twiml(welcome_greeting: str | None = None) -> str:
+    """Generate TwiML that connects the call to ConversationRelay via WebSocket."""
     if not welcome_greeting:
-        welcome_greeting = "Hola, bienvenido. ¿Con quién tengo el gusto de hablar?"
+        welcome_greeting = "Hola, bienvenido. Con quien tengo el gusto de hablar?"
 
     response = VoiceResponse()
     connect = Connect()
+    voice_settings = get_voice_settings()
+
     relay_kwargs = {
         "url": f"wss://{settings.base_url.replace('https://', '').replace('http://', '')}/ws/conversation",
-        "language": settings.twilio_conversation_language,
-        "tts_provider": settings.twilio_tts_provider,
-        "transcription_provider": settings.twilio_transcription_provider,
-        "speech_model": settings.twilio_speech_model,
+        "language": voice_settings.get("language") or settings.twilio_conversation_language,
+        "tts_provider": voice_settings.get("tts_provider") or settings.twilio_tts_provider,
+        "transcription_provider": (
+            voice_settings.get("transcription_provider") or settings.twilio_transcription_provider
+        ),
+        "speech_model": voice_settings.get("speech_model") or settings.twilio_speech_model,
         "welcome_greeting_interruptible": "any",
         "dtmf_detection": True,
         "interruptible": True,
         "welcome_greeting": welcome_greeting,
     }
 
-    if settings.twilio_tts_voice:
-        relay_kwargs["voice"] = settings.twilio_tts_voice
-    if settings.twilio_tts_model:
-        relay_kwargs["tts_model"] = settings.twilio_tts_model
-    if settings.twilio_tts_speed:
-        relay_kwargs["tts_speed"] = settings.twilio_tts_speed
-    if settings.twilio_tts_stability:
-        relay_kwargs["tts_stability"] = settings.twilio_tts_stability
-    if settings.twilio_tts_similarity_boost:
-        relay_kwargs["tts_similarity_boost"] = settings.twilio_tts_similarity_boost
+    tts_voice = voice_settings.get("tts_voice") or settings.twilio_tts_voice
+    tts_model = voice_settings.get("tts_model") or settings.twilio_tts_model
+    tts_speed = voice_settings.get("tts_speed") or settings.twilio_tts_speed
+    tts_stability = voice_settings.get("tts_stability") or settings.twilio_tts_stability
+    tts_similarity_boost = (
+        voice_settings.get("tts_similarity_boost") or settings.twilio_tts_similarity_boost
+    )
+
+    if tts_voice:
+        relay_kwargs["voice"] = tts_voice
+    if tts_model:
+        relay_kwargs["tts_model"] = tts_model
+    if tts_speed:
+        relay_kwargs["tts_speed"] = tts_speed
+    if tts_stability:
+        relay_kwargs["tts_stability"] = tts_stability
+    if tts_similarity_boost:
+        relay_kwargs["tts_similarity_boost"] = tts_similarity_boost
 
     connect.conversation_relay(**relay_kwargs)
     response.append(connect)
@@ -107,8 +117,8 @@ async def make_outbound_call(to_number: str) -> str:
         )
         logger.info("Outbound call initiated: %s -> %s (SID: %s)", settings.twilio_phone_number, to_number, call.sid)
         return call.sid
-    except Exception as e:
-        logger.error("Failed to make outbound call to %s: %s", to_number, e)
+    except Exception as exc:
+        logger.error("Failed to make outbound call to %s: %s", to_number, exc)
         raise
 
 

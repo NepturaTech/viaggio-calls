@@ -4,7 +4,6 @@ from fastapi.responses import Response
 from twilio.base.exceptions import TwilioRestException
 
 from app.config import get_settings
-from app.db.repositories import CallScriptRepository
 from app.services.twilio_service import (
     generate_conversation_relay_twiml,
     generate_realtime_stream_twiml,
@@ -15,6 +14,7 @@ from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
 from app.services.audio_archive_service import delete_call_archive
+from app.services.supabase_rest_service import get_active_call_script
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -47,8 +47,7 @@ async def handle_incoming_call(
     )
 
     # Get active script for the welcome greeting
-    script_repo = CallScriptRepository()
-    script = script_repo.get_active_script("default")
+    script = get_active_call_script()
     welcome = get_welcome_greeting(script, customer)
 
     # Return TwiML using the configured voice mode

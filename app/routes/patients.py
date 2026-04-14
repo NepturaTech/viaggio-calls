@@ -3,14 +3,18 @@ from twilio.base.exceptions import TwilioRestException
 
 from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
-from app.services.patient_csv_service import find_patient_by_phone, list_patients
+from app.services.supabase_rest_service import (
+    find_backend_patient_by_phone,
+    get_backend_contract,
+    list_backend_patients,
+)
 from app.services.twilio_service import make_outbound_call
 
 router = APIRouter(tags=["patients"])
 
 
 def _match_patients(q: str | None = None) -> list[dict]:
-    patients = list_patients()
+    patients = list_backend_patients()
     if q:
         needle = q.strip().lower()
         patients = [
@@ -25,14 +29,20 @@ def _match_patients(q: str | None = None) -> list[dict]:
 async def get_patients(
     q: str | None = Query(default=None, description="Texto para filtrar por nombre o telefono"),
 ):
-    """List patients loaded from the CSV file."""
+    """List patients from the active backend source."""
     return _match_patients(q)
+
+
+@router.get("/_meta/source")
+async def get_patient_source_meta():
+    """Expose active patient data source metadata for frontend setup."""
+    return get_backend_contract()["sources"]
 
 
 @router.get("/{phone_number}")
 async def get_patient(phone_number: str):
-    """Get one patient from CSV by phone number."""
-    patient = find_patient_by_phone(phone_number)
+    """Get one patient by phone number from the active backend source."""
+    patient = find_backend_patient_by_phone(phone_number)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     return patient
@@ -40,8 +50,8 @@ async def get_patient(phone_number: str):
 
 @router.post("/{phone_number}/call")
 async def call_patient(phone_number: str):
-    """Trigger an outbound call to a patient found in CSV/manual context."""
-    patient = find_patient_by_phone(phone_number)
+    """Trigger an outbound call to a patient found in the active backend source."""
+    patient = find_backend_patient_by_phone(phone_number)
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
@@ -72,7 +82,7 @@ async def call_patients_batch(
     limit: int = Query(default=5, ge=1, le=100, description="Numero maximo de pacientes a llamar"),
     q: str | None = Query(default=None, description="Filtro opcional por nombre o telefono"),
 ):
-    """Trigger outbound calls for a filtered batch of CSV patients."""
+    """Trigger outbound calls for a filtered batch of patients."""
     patients = _match_patients(q)[:limit]
     if not patients:
         raise HTTPException(status_code=404, detail="No patients found for batch call")

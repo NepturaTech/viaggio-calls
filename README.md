@@ -34,6 +34,7 @@ Health:
 Calls:
 - `GET /calls`
 - `GET /calls/{call_sid}`
+- `POST /calls/trigger`
 
 Patients:
 - `GET /patients`
@@ -152,3 +153,48 @@ The next recommended evolution is:
 - move patients, appointments, scripts, and settings to a database
 - keep secrets in server-side configuration
 - connect a TypeScript admin frontend to this backend
+
+## Admin Frontend Integration
+
+This backend now includes a lightweight contract for an admin frontend such as a Lovable-generated app.
+
+Useful routes:
+- `GET /admin/meta`
+- `GET /admin/data-sources`
+- `GET /admin/settings/runtime`
+- `GET /patients/_meta/source`
+- `POST /calls/trigger`
+
+These endpoints help the frontend understand:
+- which fields belong to patients, appointments, scripts, and settings
+- whether the real data sources are configured
+- which table names the backend expects
+
+## Data Sources
+
+The backend is prepared for the following data topology:
+- `Lovable Cloud`: primary project database and main source for the calling module
+- `External Supabase - Viaggio`: clinical and behavioral data
+- `Huella Delfos`: interviewees, sessions, and visitors
+
+The calling module is expected to read mainly from Lovable Cloud tables such as:
+- `call_patients`
+- `call_logs`
+- `call_artifacts`
+- `call_appointments`
+- `call_hospitals`
+- `call_scripts`
+- `call_settings`
+
+See [.env.example](C:/Users/DAVIDE/Documents/calls/plain_calls/.env.example) for the required variables.
+
+## Exposing the Backend Publicly
+
+Twilio requires a public callback URL. If you do not deploy immediately, you can expose the backend with `cloudflared` and set:
+- `BASE_URL=https://your-public-cloudflare-url`
+
+That public URL is what Twilio will use for:
+- `/twilio/voice`
+- `/twilio/status`
+- `/twilio/amd`
+- websocket endpoints under `/ws`

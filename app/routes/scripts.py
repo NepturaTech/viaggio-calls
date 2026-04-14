@@ -1,8 +1,9 @@
-"""API endpoints to view the current call script (manual mode)."""
+"""API endpoints to view the active call script."""
 import logging
+
 from fastapi import APIRouter
 
-from app.manual_data import CALL_SCRIPT
+from app.services.supabase_rest_service import get_active_call_script
 
 logger = logging.getLogger(__name__)
 
@@ -11,16 +12,11 @@ router = APIRouter(tags=["scripts"])
 
 @router.get("/")
 async def list_scripts():
-    """List all call scripts (in manual mode, just one)."""
-    return [CALL_SCRIPT]
+    """List the active call script."""
+    return [get_active_call_script()]
 
 
 @router.get("/active")
 async def get_active_script():
-    """Get the currently active call script.
-
-    To change what the bot says, edit app/manual_data.py directly:
-      - welcome_greeting → lo que dice al contestar
-      - system_prompt → instrucciones del modelo GPT
-    """
-    return CALL_SCRIPT
+    """Get the currently active call script."""
+    return get_active_call_script()
