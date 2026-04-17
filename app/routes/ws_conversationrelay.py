@@ -31,8 +31,10 @@ class ConversationSession:
         self.script: dict | None = None
         self.direction: str | None = None
         self.customer_name: str | None = None
+        self.patient_id: str | None = None
         self.call_sid: str | None = None
         self.pending_hangup: bool = False
+        self.script_name: str = "default"
 
     def add_user_message(self, text: str):
         self.conversation_history.append({"role": "user", "content": text})
@@ -73,9 +75,10 @@ def _load_call_record(call_sid: str) -> tuple[dict | None, int | None]:
 def _load_session_context(session: ConversationSession):
     customer, appointments = get_customer_context(session.customer_phone or "")
     session.customer_name = customer["full_name"] if customer else None
+    session.patient_id = str(customer.get("document_number") or "") if customer else None
 
     script_repo = CallScriptRepository()
-    session.script = script_repo.get_active_script("default")
+    session.script = script_repo.get_active_script(session.script_name or "default")
     session.system_prompt = build_context_prompt(customer, appointments, session.script)
     return customer, appointments
 
@@ -193,8 +196,20 @@ async def realtime_media_ws(websocket: WebSocket):
     stream_sid: str | None = None
     openai_ws = None
     archive: CallAudioArchive | None = None
+    archive_finalized = False
 
     logger.info("Realtime media WebSocket connected")
+
+    def finalize_archive_once():
+        nonlocal archive_finalized, archive
+        if archive is None or archive_finalized:
+            return
+        try:
+            archive.close()
+            archive_finalized = True
+            logger.info("Audio archive finalized for call %s", session.call_sid)
+        except Exception as exc:
+            logger.error("Failed to finalize local audio archive: %s", exc, exc_info=True)
 
     async def twilio_to_openai():
         nonlocal stream_sid, openai_ws, archive
@@ -218,9 +233,26 @@ async def realtime_media_ws(websocket: WebSocket):
                 session.customer_phone = custom_parameters.get("customer_phone", "")
                 session.customer_name = custom_parameters.get("customer_name", "")
                 session.direction = custom_parameters.get("direction", "")
+                session.script_name = custom_parameters.get("script_name", "default")
                 _load_session_context(session)
-                archive = CallAudioArchive(call_sid, session.customer_name)
+                archive = CallAudioArchive(
+                    call_sid,
+                    session.customer_name,
+                    session.patient_id,
+                    session.script_name,
+                )
                 openai_ws = await connect_realtime(session.system_prompt)
+                logger.info(
+                    "Realtime custom parameters received: %s",
+                    {
+                        "customer_phone": session.customer_phone,
+                        "customer_name": session.customer_name,
+                        "patient_id": session.patient_id,
+                        "direction": session.direction,
+                        "script_name": session.script_name,
+                        "welcome_greeting": custom_parameters.get("welcome_greeting", ""),
+                    },
+                )
                 await request_initial_greeting(
                     openai_ws,
                     custom_parameters.get("welcome_greeting", ""),
@@ -256,6 +288,10 @@ async def realtime_media_ws(websocket: WebSocket):
                 logger.info("Twilio media stream stopped")
                 if session.call_id:
                     log_call_event(session.call_id, "realtime_stop", event)
+                finalize_archive_once()
+                if openai_ws is not None:
+                    with contextlib.suppress(Exception):
+                        await openai_ws.close()
                 break
 
             else:
@@ -355,14 +391,11 @@ async def realtime_media_ws(websocket: WebSocket):
         if session.call_id:
             finalize_call(session.call_id, "failed", summary=str(exc))
     finally:
+        logger.info("Finalizing realtime media session for call %s", session.call_sid)
         if openai_ws is not None:
             with contextlib.suppress(Exception):
                 await openai_ws.close()
-        if archive is not None:
-            try:
-                archive.close()
-            except Exception as exc:
-                logger.error("Failed to finalize local audio archive: %s", exc, exc_info=True)
+        finalize_archive_once()
 
         if session.call_id:
             summary = " | ".join(

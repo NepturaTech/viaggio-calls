@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime
 
-from app.manual_data import CUSTOMERS, APPOINTMENTS, CALL_SCRIPT
+from app.manual_data import CUSTOMERS, APPOINTMENTS, CALL_SCRIPT, CALL_SCRIPTS
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +130,17 @@ class CallEventRepository:
 
 class CallScriptRepository:
     def get_active_script(self, name: str = "default") -> dict | None:
-        if CALL_SCRIPT.get("active") and CALL_SCRIPT.get("name") == name:
+        normalized = (name or "default").strip().lower()
+        if normalized == "default":
+            normalized = "seguimiento"
+
+        script = CALL_SCRIPTS.get(normalized)
+        if script and script.get("active"):
+            return script
+
+        if CALL_SCRIPT.get("active"):
             return CALL_SCRIPT
         return None
 
     def list_scripts(self) -> list[dict]:
-        return [CALL_SCRIPT]
+        return list(CALL_SCRIPTS.values())

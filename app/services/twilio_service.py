@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import quote
 
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
@@ -81,6 +82,7 @@ def generate_realtime_stream_twiml(
     customer_phone: str,
     customer_name: str | None,
     direction: str,
+    script_name: str | None = None,
     welcome_greeting: str | None = None,
 ) -> str:
     """Generate TwiML that connects the call to a bidirectional media stream."""
@@ -92,20 +94,22 @@ def generate_realtime_stream_twiml(
     stream.parameter(name="customer_phone", value=customer_phone or "")
     stream.parameter(name="customer_name", value=customer_name or "")
     stream.parameter(name="direction", value=direction)
+    stream.parameter(name="script_name", value=script_name or "default")
     stream.parameter(name="project_name", value="Biomarcadores")
     if welcome_greeting:
         stream.parameter(name="welcome_greeting", value=welcome_greeting)
     return str(response)
 
 
-async def make_outbound_call(to_number: str) -> str:
+async def make_outbound_call(to_number: str, script_name: str = "default") -> str:
     """Initiate an outbound call using Twilio."""
     try:
         base_url = _validate_public_base_url()
+        encoded_script_name = quote(script_name or "default", safe="")
         call = twilio_client.calls.create(
             to=to_number,
             from_=settings.twilio_phone_number,
-            url=f"{base_url}/twilio/voice",
+            url=f"{base_url}/twilio/voice?script_name={encoded_script_name}",
             method="POST",
             status_callback=f"{base_url}/twilio/status",
             status_callback_method="POST",
@@ -115,7 +119,13 @@ async def make_outbound_call(to_number: str) -> str:
             async_amd_status_callback=f"{base_url}/twilio/amd",
             async_amd_status_callback_method="POST",
         )
-        logger.info("Outbound call initiated: %s -> %s (SID: %s)", settings.twilio_phone_number, to_number, call.sid)
+        logger.info(
+            "Outbound call initiated: %s -> %s (SID: %s, script=%s)",
+            settings.twilio_phone_number,
+            to_number,
+            call.sid,
+            script_name,
+        )
         return call.sid
     except Exception as exc:
         logger.error("Failed to make outbound call to %s: %s", to_number, exc)

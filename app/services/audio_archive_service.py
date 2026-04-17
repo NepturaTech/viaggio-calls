@@ -3,6 +3,7 @@ import base64
 import contextlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ import subprocess
 import wave
 from datetime import datetime
 from pathlib import Path
+
+import httpx
 
 from app.config import get_settings
 
@@ -21,9 +24,17 @@ logger = logging.getLogger(__name__)
 class CallAudioArchive:
     """Persist call audio and transcript artifacts locally for QA."""
 
-    def __init__(self, call_sid: str, patient_name: str | None = None):
+    def __init__(
+        self,
+        call_sid: str,
+        patient_name: str | None = None,
+        patient_id: str | None = None,
+        script_name: str | None = None,
+    ):
         self.call_sid = call_sid
         self.patient_name = patient_name or ""
+        self.patient_id = patient_id or ""
+        self.script_name = script_name or "default"
         slug = self._slugify_patient_name(self.patient_name)
         patient_folder = slug or "sin_nombre"
         self.base_dir = Path("audios") / patient_folder / call_sid
@@ -38,6 +49,7 @@ class CallAudioArchive:
         self.transcript_txt_path = self.base_dir / "transcript.txt"
         self.archive_meta_path = self.base_dir / "archive_meta.json"
         self._conversion_results: dict[str, dict] = {}
+        self._remote_artifacts: dict[str, dict] = {}
 
         self._user_wav = self._open_wave(self.user_wav_path)
         self._assistant_wav = self._open_wave(self.assistant_wav_path)
@@ -94,6 +106,9 @@ class CallAudioArchive:
             shutil.rmtree(self.base_dir, ignore_errors=True)
             logger.info("Discarded empty local archive for %s", self.call_sid)
             return
+        self._remote_artifacts = self._upload_artifacts_to_storage()
+        self._sync_artifacts_to_table()
+        self._sync_transcripts_to_table()
         self._write_call_json()
         self._write_archive_meta()
 
@@ -119,6 +134,7 @@ class CallAudioArchive:
                 "transcript_json": str(self.transcript_json_path),
                 "transcript_txt": str(self.transcript_txt_path),
             },
+            "remote_artifacts": self._remote_artifacts,
         }
         self.archive_meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2),
@@ -129,6 +145,8 @@ class CallAudioArchive:
         payload = {
             "call_sid": self.call_sid,
             "patient_name": self.patient_name,
+            "patient_id": self.patient_id,
+            "script_name": self.script_name,
             "created_at": datetime.utcnow().isoformat(),
             "transcript_lines": self._transcript_lines,
             "artifacts": {
@@ -137,11 +155,238 @@ class CallAudioArchive:
                 "user_mp3": str(self.user_mp3_path if self.user_mp3_path.exists() else ""),
                 "assistant_mp3": str(self.assistant_mp3_path if self.assistant_mp3_path.exists() else ""),
             },
+            "remote_artifacts": self._remote_artifacts,
         }
         self.call_json_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _storage_config() -> dict[str, str]:
+        url = (settings.audio_storage_url or settings.lovable_cloud_url or "").rstrip("/")
+        key = (
+            settings.audio_storage_service_role_key
+            or settings.audio_storage_anon_key
+            or settings.lovable_cloud_service_role_key
+            or settings.lovable_cloud_anon_key
+        )
+        bucket = (settings.audio_storage_bucket or settings.lovable_storage_bucket or "audio-recordings").strip()
+        return {"url": url, "key": key, "bucket": bucket}
+
+    @classmethod
+    def _storage_enabled(cls) -> bool:
+        config = cls._storage_config()
+        return bool(settings.audio_storage_enabled and config["url"] and config["key"] and config["bucket"])
+
+    def _storage_headers(self, content_type: str) -> dict[str, str]:
+        config = self._storage_config()
+        key = config["key"]
+        return {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        }
+
+    def _upload_artifacts_to_storage(self) -> dict[str, dict]:
+        if not self._storage_enabled():
+            return {}
+
+        uploads: dict[str, dict] = {}
+        for label, path in {
+            "user_mp3": self.user_mp3_path,
+            "assistant_mp3": self.assistant_mp3_path,
+            "transcript_json": self.transcript_json_path,
+            "transcript_txt": self.transcript_txt_path,
+            "call_json": self.call_json_path,
+        }.items():
+            if not path.exists() or path.stat().st_size == 0:
+                continue
+            uploads[label] = self._upload_single_artifact(path)
+        return uploads
+
+    def _upload_single_artifact(self, path: Path) -> dict:
+        config = self._storage_config()
+        relative_path = "/".join(
+            [
+                self.base_dir.parent.name,
+                self.call_sid,
+                path.name,
+            ]
+        )
+        endpoint = f"{config['url']}/storage/v1/object/{config['bucket']}/{relative_path}"
+        content_type, _ = mimetypes.guess_type(str(path))
+        content_type = content_type or "application/octet-stream"
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    endpoint,
+                    headers=self._storage_headers(content_type),
+                    content=path.read_bytes(),
+                )
+                response.raise_for_status()
+            public_url = (
+                f"{config['url']}/storage/v1/object/public/{config['bucket']}/{relative_path}"
+            )
+            logger.info("Uploaded call artifact to Supabase Storage: %s", public_url)
+            return {
+                "status": "ok",
+                "path": relative_path,
+                "public_url": public_url,
+                "size_bytes": path.stat().st_size,
+            }
+        except Exception as exc:
+            details = ""
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                details = exc.response.text[:500]
+            logger.warning(
+                "Failed to upload %s to Supabase Storage: %s | details=%s",
+                path.name,
+                exc,
+                details,
+            )
+            return {
+                "status": "error",
+                "path": relative_path,
+                "error": str(exc),
+                "details": details,
+            }
+
+    @staticmethod
+    def _dataset_headers() -> dict[str, str]:
+        key = settings.external_viaggio_dataset_api_key or settings.external_viaggio_service_role_key or settings.external_viaggio_anon_key
+        return {
+            "Content-Type": "application/json",
+            "x-api-key": key,
+        }
+
+    def _sync_transcripts_to_table(self):
+        if not self._transcript_lines:
+            return
+
+        endpoint = (settings.external_viaggio_call_transcripts_dataset_url or "").strip()
+        key = settings.external_viaggio_dataset_api_key or settings.external_viaggio_service_role_key or settings.external_viaggio_anon_key
+        if not (endpoint and key):
+            return
+
+        records = [
+            {
+                "patient_internal_id": self.patient_id or "",
+                "data": {
+                    "call_sid": self.call_sid,
+                    "patient_id": self.patient_id or None,
+                    "patient_name": self.patient_name or None,
+                    "script_name": self.script_name or None,
+                    "role": item.get("role"),
+                    "text": item.get("text"),
+                    "created_at": item.get("created_at"),
+                },
+                "source": settings.external_viaggio_call_transcripts_source or "sensor",
+                "source_metadata": {
+                    "device_id": settings.external_viaggio_call_transcripts_device_id or "CALL-BOT-001",
+                },
+            }
+            for item in self._transcript_lines
+            if item.get("text")
+        ]
+        if not records:
+            return
+
+        payload = {"records": records}
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                response = client.post(
+                    endpoint,
+                    headers=self._dataset_headers(),
+                    content=json.dumps(payload, ensure_ascii=False),
+                )
+                response.raise_for_status()
+            logger.info(
+                "Synced %d transcript lines to Viaggio dataset for call %s",
+                len(records),
+                self.call_sid,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to sync transcript lines to Viaggio dataset for call %s: %s",
+                self.call_sid,
+                exc,
+            )
+
+    @staticmethod
+    def _lovable_table_headers() -> dict[str, str]:
+        key = (
+            settings.lovable_cloud_service_role_key
+            or settings.lovable_cloud_anon_key
+        )
+        return {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+
+    def _sync_artifacts_to_table(self):
+        if not self._remote_artifacts:
+            return
+
+        base_url = (settings.lovable_cloud_url or "").rstrip("/")
+        table = (settings.lovable_call_artifacts_table or "").strip()
+        key = (
+            settings.lovable_cloud_service_role_key
+            or settings.lovable_cloud_anon_key
+        )
+        if not (base_url and table and key):
+            return
+
+        rows = []
+        for artifact_type, artifact in self._remote_artifacts.items():
+            if artifact.get("status") != "ok":
+                continue
+            public_url = artifact.get("public_url", "")
+            content_type, _ = mimetypes.guess_type(public_url)
+            rows.append(
+                {
+                    "call_sid": self.call_sid,
+                    "patient_id": self.patient_id or None,
+                    "patient_name": self.patient_name or None,
+                    "script_name": self.script_name or None,
+                    "artifact_type": artifact_type,
+                    "storage_path": artifact.get("path"),
+                    "public_url": public_url,
+                    "content_type": content_type or "application/octet-stream",
+                    "size_bytes": artifact.get("size_bytes"),
+                    "created_at": datetime.utcnow().isoformat(),
+                }
+            )
+
+        if not rows:
+            return
+
+        endpoint = f"{base_url}/rest/v1/{table}"
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                response = client.post(
+                    endpoint,
+                    headers=self._lovable_table_headers(),
+                    content=json.dumps(rows, ensure_ascii=False),
+                )
+                response.raise_for_status()
+            logger.info(
+                "Synced %d artifact rows to lovable table %s for call %s",
+                len(rows),
+                table,
+                self.call_sid,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to sync artifacts to lovable table %s for call %s: %s",
+                table,
+                self.call_sid,
+                exc,
+            )
 
     @staticmethod
     def _resolve_ffmpeg_path() -> str | None:

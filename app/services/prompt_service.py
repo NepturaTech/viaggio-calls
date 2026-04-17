@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -30,11 +31,25 @@ DEFAULT_SYSTEM_PROMPT = """Eres un asistente telefonico automatizado para seguim
 """
 
 DEFAULT_WELCOME = (
-    "Hola {call_name}, mucho gusto. "
-    "Te llamo por el proyecto de diabetes mellitus tipo 2. "
-    "Me comunico de parte del hospital y queria hacerte un seguimiento breve. "
-    "Tienes un minuto para conversar?"
+    "Hola, hablo con {call_name}?"
 )
+
+
+def _clean_welcome_greeting(text: str) -> str:
+    cleaned = " ".join((text or "").split())
+    cleaned = re.sub(
+        r"Hola,\s*hablo con\s*\?\s*Te habla Andrea\.?\s*",
+        "Hola, te habla Andrea. ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"Hola,\s*hablo con\s*\?\s*",
+        "Hola, te habla Andrea. ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
 
 
 @lru_cache
@@ -123,12 +138,15 @@ def build_context_prompt(
 
     hospital_name = customer.get("hospital_name")
     project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
+    call_name = get_call_name(customer) or customer.get("full_name", "")
     if hospital_name:
         context += (
             "\n## Instrucciones de presentacion\n"
             f"- Presentate una sola vez al inicio.\n"
             f"- Explica que llamas por el {project_name}.\n"
             f"- Di que te comunicas de parte del {hospital_name}.\n"
+            f"- Si la persona confirma que si es ella, en tu siguiente respuesta vuelve a mencionar con claridad que llamas de parte del {hospital_name} antes de pasar a la siguiente pregunta.\n"
+            f"- Despues de confirmar identidad, usa una frase parecida a: 'mucho gusto, te habla Andrea. Me comunico de parte del {hospital_name} por el {project_name}'.\n"
             "- No menciones Biomarcadores repetidamente.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Evita despedidas exageradas o demasiado afectuosas.\n"
@@ -142,10 +160,22 @@ def build_context_prompt(
             "\n## Instrucciones de presentacion\n"
             f"- Presentate una sola vez al inicio por el {project_name}.\n"
             "- Di que te comunicas de parte del hospital correspondiente.\n"
+            "- Si la persona confirma que si es ella, vuelve a mencionar de forma breve que llamas de parte del hospital antes de seguir.\n"
             "- No menciones Biomarcadores repetidamente.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Si el usuario quiere terminar, cierra de forma breve y amable.\n"
         )
+
+    context += (
+        "\n## Flujo exacto de apertura\n"
+        f"- Primera intervencion exacta: 'Hola, hablo con {call_name}?'\n"
+        f"- Si la persona responde algo ambiguo como 'alo', 'si', 'quien habla', 'de parte de quien' o similar, todavia no asumas que ya confirmo identidad.\n"
+        f"- Si preguntan 'de parte de quien' o 'quien habla', responde: 'Hola, mucho gusto, te habla Andrea. Me comunico de parte del {hospital_name or 'hospital correspondiente'} por el {project_name}. ¿Hablo con {call_name}?'\n"
+        f"- Si la persona responde de forma ambigua como 'alo' o no se entiende, repite solo la confirmacion de identidad: 'Hola, hablo con {call_name}?'\n"
+        f"- Si la persona confirma claramente con frases como 'si', 'si con el', 'soy yo', 'con el habla' o equivalente, no vuelvas a preguntar '¿Hablo con {call_name}?'.\n"
+        f"- Cuando ya quede confirmada la identidad, continua con una frase natural como: 'Que bueno, {call_name}. Me alegra saludarte. Te comento que esta llamada es para hacer seguimiento a la visita de campo y ver como va tu salud en el marco del proyecto. ¿Como te has sentido ultimamente?'\n"
+        "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma primera respuesta salvo que la identidad ya este confirmada.\n"
+    )
 
     return base_prompt + context
 
@@ -179,34 +209,34 @@ def get_welcome_greeting(script: dict | None = None, customer: dict | None = Non
         if customer:
             first_name = customer.get("full_name", "").strip().split()[0] or "hola"
             call_name = get_call_name(customer) or first_name
-            return greeting.format(
+            return _clean_welcome_greeting(greeting.format(
                 first_name=first_name,
                 call_name=call_name,
                 full_name=customer.get("full_name", ""),
                 project_name=project_name,
                 hospital_name=hospital_name or "hospital de referencia",
-            )
-        return greeting.format(
+            ))
+        return _clean_welcome_greeting(greeting.format(
             first_name="",
             call_name="",
             full_name="",
             project_name=project_name,
             hospital_name=hospital_name or "hospital de referencia",
-        ).replace("  ", " ").strip()
+        ))
     if customer:
         first_name = customer.get("full_name", "").strip().split()[0] or "hola"
         call_name = get_call_name(customer) or first_name
         project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
         hospital_name = customer.get("hospital_name") or "hospital de referencia"
-        return DEFAULT_WELCOME.format(
+        return _clean_welcome_greeting(DEFAULT_WELCOME.format(
             first_name=first_name,
             call_name=call_name,
             project_name=project_name,
             hospital_name=hospital_name,
-        )
-    return DEFAULT_WELCOME.format(
+        ))
+    return _clean_welcome_greeting(DEFAULT_WELCOME.format(
         first_name="",
         call_name="",
         project_name="proyecto de diabetes mellitus tipo 2",
         hospital_name="hospital de referencia",
-    ).replace("  ", " ").strip()
+    ))

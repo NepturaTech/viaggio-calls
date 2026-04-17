@@ -35,6 +35,7 @@ async def handle_incoming_call(
 
     customer_phone = To if From == settings.twilio_phone_number else From
     direction = "outbound" if From == settings.twilio_phone_number else "inbound"
+    script_name = request.query_params.get("script_name", "default")
 
     # Look up customer in manual data
     customer, _ = get_customer_context(customer_phone)
@@ -47,8 +48,25 @@ async def handle_incoming_call(
     )
 
     # Get active script for the welcome greeting
-    script = get_active_call_script()
+    script = get_active_call_script(script_name)
     welcome = get_welcome_greeting(script, customer)
+    logger.info(
+        "Call context prepared: customer=%s script=%s voice_mode=%s welcome=%s",
+        {
+            "full_name": customer.get("full_name") if customer else None,
+            "phone_number": customer.get("phone_number") if customer else customer_phone,
+            "hospital_name": customer.get("hospital_name") if customer else None,
+            "project_name": customer.get("project_name") if customer else None,
+            "source": customer.get("source") if customer else None,
+        },
+        {
+            "name": script.get("name") if script else None,
+            "project_name": script.get("project_name") if script else None,
+            "requested_script_name": script_name,
+        },
+        settings.twilio_voice_mode,
+        welcome,
+    )
 
     # Return TwiML using the configured voice mode
     if settings.twilio_voice_mode == "realtime":
@@ -57,6 +75,7 @@ async def handle_incoming_call(
                 customer_phone=customer_phone,
                 customer_name=customer["full_name"] if customer else None,
                 direction=direction,
+                script_name=script_name,
                 welcome_greeting=welcome,
             )
         except Exception:
@@ -122,7 +141,7 @@ async def trigger_outbound_call(
         script_name: Name of the script to use.
     """
     try:
-        call_sid = await make_outbound_call(to_number)
+        call_sid = await make_outbound_call(to_number, script_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TwilioRestException as exc:

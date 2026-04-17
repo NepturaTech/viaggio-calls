@@ -46,9 +46,9 @@ async def connect_realtime(instructions: str):
             },
             "turn_detection": {
                 "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 700,
+                "threshold": 0.7,
+                "prefix_padding_ms": 400,
+                "silence_duration_ms": 1000,
                 "create_response": True,
                 "interrupt_response": True,
             },
@@ -76,7 +76,7 @@ def describe_realtime_error(exc: Exception) -> str:
 
 
 async def request_initial_greeting(ws, greeting: str):
-    """Ask the realtime model to open the conversation with a natural greeting."""
+    """Ask the realtime model to open the conversation with the scripted greeting."""
     if not greeting:
         return
 
@@ -87,8 +87,10 @@ async def request_initial_greeting(ws, greeting: str):
             "instructions": (
                 "Abre la llamada en espanol, con tono calido y natural. "
                 f"{settings.openai_realtime_speaking_style} "
-                "Di este saludo como primera intervencion, manteniendolo fluido y humano: "
-                f"{greeting}"
+                "Tu primera intervencion debe decir exactamente este saludo, sin reformularlo, "
+                "sin resumirlo, sin cambiar el orden y sin hacer otra pregunta antes. "
+                "Pronuncialo con naturalidad, pero respeta el texto. "
+                f"Saludo exacto: {greeting}"
             ),
         },
     }
