@@ -31,48 +31,88 @@ def _validate_public_base_url() -> str:
     return base_url
 
 
-def generate_conversation_relay_twiml(welcome_greeting: str | None = None) -> str:
+def _build_recording_announcement(welcome_greeting: str | None) -> str:
+    greeting = (welcome_greeting or "").strip()
+    announcement = (settings.twilio_recording_announcement or "").strip()
+    if not announcement:
+        return greeting
+    if greeting.lower().startswith(announcement.lower()):
+        return greeting
+    if not greeting:
+        return announcement
+    return f"{announcement} {greeting}"
+
+
+def generate_conversation_relay_twiml(
+    welcome_greeting: str | None = None,
+    script_name: str | None = None,
+) -> str:
     """Generate TwiML that connects the call to ConversationRelay via WebSocket."""
     if not welcome_greeting:
         welcome_greeting = "Hola, bienvenido. Con quien tengo el gusto de hablar?"
 
     response = VoiceResponse()
+    base_url = _validate_public_base_url()
+
+    # NOTA: Para ConversationRelay la grabación se inicia via Recordings REST API
+    # (make_outbound_call usa record=True; inbound usa start_call_recording() desde el WebSocket).
+    # <Start><Record> en TwiML NO es compatible con ConversationRelay.
+    # Solo preparamos el saludo con el aviso legal si la grabación está habilitada.
+    if settings.twilio_recording_enabled:
+        welcome_greeting = _build_recording_announcement(welcome_greeting)
+
     connect = Connect()
     voice_settings = get_voice_settings()
 
+    tts_provider = (voice_settings.get("tts_provider") or settings.twilio_tts_provider or "").strip()
+    tts_voice    = voice_settings.get("tts_voice") or settings.twilio_tts_voice or ""
+    tts_model    = voice_settings.get("tts_model") or settings.twilio_tts_model or ""
+    language     = voice_settings.get("language") or settings.twilio_conversation_language or "es-US"
+    speech_model = voice_settings.get("speech_model") or settings.twilio_speech_model or "telephony"
+
+    # FIX: Google transcription + español solo soporta 'telephony' o 'phone_call'
+    # 'experimental_conversations' solo funciona con Google + en-US.
+    transcription_provider = (
+        voice_settings.get("transcription_provider") or settings.twilio_transcription_provider or "Google"
+    )
+    if transcription_provider.lower() == "google" and speech_model == "experimental_conversations":
+        speech_model = "telephony"
+        logger.warning(
+            "speech_model cambiado a 'telephony': "
+            "Google + experimental_conversations solo funciona con en-US, no con %s",
+            language,
+        )
+
+    ws_url = f"wss://{base_url.replace('https://', '').replace('http://', '')}/ws/conversation"
+    if script_name and script_name.strip() not in ("", "default"):
+        ws_url += f"?script_name={quote(script_name.strip(), safe='')}"
+
     relay_kwargs = {
-        "url": f"wss://{settings.base_url.replace('https://', '').replace('http://', '')}/ws/conversation",
-        "language": voice_settings.get("language") or settings.twilio_conversation_language,
-        "tts_provider": voice_settings.get("tts_provider") or settings.twilio_tts_provider,
-        "transcription_provider": (
-            voice_settings.get("transcription_provider") or settings.twilio_transcription_provider
-        ),
-        "speech_model": voice_settings.get("speech_model") or settings.twilio_speech_model,
+        "url": ws_url,
+        "language": language,
+        "tts_provider": tts_provider,
+        "transcription_provider": transcription_provider,
+        "speech_model": speech_model,
         "welcome_greeting_interruptible": "any",
         "dtmf_detection": True,
         "interruptible": True,
         "welcome_greeting": welcome_greeting,
     }
 
-    tts_voice = voice_settings.get("tts_voice") or settings.twilio_tts_voice
-    tts_model = voice_settings.get("tts_model") or settings.twilio_tts_model
-    tts_speed = voice_settings.get("tts_speed") or settings.twilio_tts_speed
-    tts_stability = voice_settings.get("tts_stability") or settings.twilio_tts_stability
-    tts_similarity_boost = (
-        voice_settings.get("tts_similarity_boost") or settings.twilio_tts_similarity_boost
-    )
-
+    # FIX: tts_model NO es un atributo válido de <ConversationRelay>.
+    # Para ElevenLabs, el modelo va embebido en el string de voice:
+    #   voice="VOICE_ID-MODEL-SPEED_STABILITY_SIMILARITY"
+    # No se agrega tts_model como kwarg separado.
     if tts_voice:
         relay_kwargs["voice"] = tts_voice
-    if tts_model:
-        relay_kwargs["tts_model"] = tts_model
-    if tts_speed:
-        relay_kwargs["tts_speed"] = tts_speed
-    if tts_stability:
-        relay_kwargs["tts_stability"] = tts_stability
-    if tts_similarity_boost:
-        relay_kwargs["tts_similarity_boost"] = tts_similarity_boost
 
+    logger.info(
+        "Generating ConversationRelay TwiML: provider=%s voice=%s language=%s speech_model=%s",
+        tts_provider,
+        tts_voice,
+        language,
+        speech_model,
+    )
     connect.conversation_relay(**relay_kwargs)
     response.append(connect)
     return str(response)
@@ -101,15 +141,36 @@ def generate_realtime_stream_twiml(
     return str(response)
 
 
-async def make_outbound_call(to_number: str, script_name: str = "default") -> str:
+async def make_outbound_call(
+    to_number: str,
+    script_name: str = "default",
+    patient_name: str = "",
+    patient_document_number: str = "",
+) -> str:
     """Initiate an outbound call using Twilio."""
     try:
         base_url = _validate_public_base_url()
         encoded_script_name = quote(script_name or "default", safe="")
+        voice_url = f"{base_url}/twilio/voice?script_name={encoded_script_name}"
+        if patient_name:
+            voice_url += f"&patient_name={quote(patient_name, safe='')}"
+        if patient_document_number:
+            voice_url += f"&patient_document_number={quote(patient_document_number, safe='')}"
+
+        recording_kwargs = {}
+        if settings.twilio_recording_enabled:
+            recording_kwargs = {
+                "record": True,
+                "recording_channels": settings.twilio_recording_channels or "dual",
+                "recording_status_callback": f"{base_url}/twilio/recording-status",
+                "recording_status_callback_method": "POST",
+                "recording_status_callback_event": ["completed"],
+            }
+
         call = twilio_client.calls.create(
             to=to_number,
             from_=settings.twilio_phone_number,
-            url=f"{base_url}/twilio/voice?script_name={encoded_script_name}",
+            url=voice_url,
             method="POST",
             status_callback=f"{base_url}/twilio/status",
             status_callback_method="POST",
@@ -118,6 +179,7 @@ async def make_outbound_call(to_number: str, script_name: str = "default") -> st
             async_amd="true" if settings.twilio_async_amd else "false",
             async_amd_status_callback=f"{base_url}/twilio/amd",
             async_amd_status_callback_method="POST",
+            **recording_kwargs,
         )
         logger.info(
             "Outbound call initiated: %s -> %s (SID: %s, script=%s)",
@@ -130,6 +192,27 @@ async def make_outbound_call(to_number: str, script_name: str = "default") -> st
     except Exception as exc:
         logger.error("Failed to make outbound call to %s: %s", to_number, exc)
         raise
+
+
+def start_call_recording(call_sid: str) -> str | None:
+    """Start a dual-channel recording on an already-active call via la Recordings API.
+
+    Útil para llamadas **entrantes** donde no se puede pasar ``record=True`` en
+    ``calls.create()``.  Twilio notificará a ``/twilio/recording-status``
+    cuando el MP3 esté listo.
+    """
+    try:
+        base_url = _validate_public_base_url()
+        recording = twilio_client.calls(call_sid).recordings.create(
+            recording_channels="dual",
+            recording_status_callback=f"{base_url}/twilio/recording-status",
+            recording_status_callback_method="POST",
+        )
+        logger.info("Recording started for call %s: recording_sid=%s", call_sid, recording.sid)
+        return recording.sid
+    except Exception as exc:
+        logger.warning("Failed to start recording for call %s: %s", call_sid, exc)
+        return None
 
 
 def hangup_call(call_sid: str):

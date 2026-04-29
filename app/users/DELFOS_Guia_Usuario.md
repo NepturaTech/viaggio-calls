@@ -140,3 +140,49 @@ Las alertas son informativas. Consulta con tu profesional de salud para recibir 
 ---
 
 *Este documento es una guía informativa para los usuarios del proyecto DELFOS. Para información técnica, consulte la documentación del sistema.*
+
+
+# Información sobre el aplicativo Biomarcadores, si preguntan el aplicación movil
+
+Qué es Biomarcadores
+Biomarcadores es una aplicación de seguimiento personal de salud y bienestar que te ayuda a visualizar datos como actividad física, ritmo cardíaco estimado y otros indicadores relacionados con tus hábitos y mediciones dentro de la app.
+
+Objetivo de la app
+El objetivo de Biomarcadores es darte una referencia orientativa sobre tu estado y evolución a partir de datos del dispositivo, sensores de salud y mediciones realizadas en la app.
+No sustituye un diagnóstico médico ni reemplaza equipos clínicos o la valoración de un profesional de la salud.
+
+Para qué sirve
+
+Consultar tu historial de mediciones.
+Visualizar datos de actividad y salud sincronizados desde tu dispositivo.
+Estimar ciertos indicadores mediante la cámara y señales del teléfono.
+Apoyarte en el seguimiento de hábitos y tendencias personales.
+Centralizar información de salud en un solo lugar para consulta personal.
+Qué puede hacer el usuario
+
+Iniciar sesión y gestionar su perfil.
+Realizar mediciones dentro de la app.
+Consultar el historial de resultados guardados.
+Sincronizar información de salud desde plataformas compatibles como Health Connect, Samsung Health o Apple Health, según el dispositivo.
+Revisar datos de actividad como pasos y otras señales disponibles.
+Consultar ayuda y orientación de uso.
+Cerrar sesión.
+Borrar datos locales del dispositivo.
+Solicitar la eliminación de su cuenta y de sus datos.
+Qué tipo de información puede usar la app
+Según el dispositivo y los permisos otorgados, la app puede usar:
+
+Cámara
+Actividad física
+Pasos
+Frecuencia cardíaca
+Sueño
+Datos de plataformas de salud compatibles
+Importante para el usuario
+
+Los resultados son orientativos.
+Algunas funciones dependen de permisos del sistema.
+Algunas integraciones pueden variar según Android, iPhone, Samsung Health, Health Connect o Apple Health.
+La precisión puede cambiar según iluminación, movimiento, posición del dedo y modelo del dispositivo.
+Mensaje corto tipo ficha o onboarding
+Biomarcadores te ayuda a seguir tus mediciones, actividad y tendencias de salud desde tu celular, integrando datos del dispositivo y plataformas compatibles. Sus resultados son orientativos y no reemplazan la evaluación de un profesional de la salud.

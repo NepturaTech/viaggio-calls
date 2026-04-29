@@ -1,5 +1,7 @@
 import logging
+import time
 from functools import lru_cache
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -15,6 +17,15 @@ from app.services.patient_csv_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CALL_SETTINGS_CACHE_TTL_SECONDS = 120.0
+_call_settings_cache: dict[str, Any] | None = None
+_call_settings_cache_source = "uninitialized"
+_call_settings_cache_loaded_at = 0.0
+_DATASET_CACHE_TTL_SECONDS = 60.0
+_dataset_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_HUELLA_CACHE_TTL_SECONDS = 120.0
+_huella_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _settings():
@@ -84,6 +95,219 @@ def _request_rows(source: str, table: str, params: dict[str, str] | None = None)
         return []
 
 
+def _dataset_headers() -> dict[str, str]:
+    settings = _settings()
+    key = (
+        settings.external_viaggio_dataset_api_key
+        or settings.external_viaggio_service_role_key
+        or settings.external_viaggio_anon_key
+    )
+    return {
+        "x-api-key": key,
+        "Accept": "application/json",
+    }
+
+
+def _request_dataset_records(dataset_url: str) -> list[dict[str, Any]]:
+    settings = _settings()
+    key = (
+        settings.external_viaggio_dataset_api_key
+        or settings.external_viaggio_service_role_key
+        or settings.external_viaggio_anon_key
+    )
+    if not dataset_url or not key:
+        return []
+
+    now = time.monotonic()
+    cached = _dataset_cache.get(dataset_url)
+    if cached and (now - cached[0]) < _DATASET_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            records: list[dict[str, Any]] = []
+            offset = 0
+            limit = 100
+
+            while True:
+                response = client.get(
+                    dataset_url,
+                    headers=_dataset_headers(),
+                    params={"offset": offset, "limit": limit},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                page_records = payload.get("records", []) if isinstance(payload, dict) else []
+                if not isinstance(page_records, list):
+                    page_records = []
+                records.extend(page_records)
+
+                has_more = bool(payload.get("has_more")) if isinstance(payload, dict) else False
+                page_limit = int(payload.get("limit") or limit) if isinstance(payload, dict) else limit
+                page_offset = int(payload.get("offset") or offset) if isinstance(payload, dict) else offset
+
+                if not has_more or not page_records:
+                    break
+
+                offset = page_offset + page_limit
+
+        _dataset_cache[dataset_url] = (now, records)
+        return records
+    except Exception as exc:
+        logger.warning("Viaggio dataset request failed for %s: %s", dataset_url, exc)
+        return []
+
+
+def _dataset_data(record: dict[str, Any]) -> dict[str, Any]:
+    data = record.get("data", {})
+    return data if isinstance(data, dict) else {}
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_dataset_patient(record: dict[str, Any]) -> dict[str, Any]:
+    data = _dataset_data(record)
+    return {
+        "id": data.get("id") or record.get("id"),
+        "full_name": data.get("nombre"),
+        "phone_number": normalize_phone(_as_text(data.get("numero"))),
+        "document_number": _as_text(data.get("identificacion") or record.get("patient_internal_id")),
+        "age": data.get("edad"),
+        "sex": data.get("sexo"),
+        "municipality": data.get("municipio"),
+        "email": data.get("email"),
+        "imc": data.get("imc"),
+        "diet": data.get("tipo_dieta"),
+        "findrisc": data.get("puntaje_findrisc"),
+        "objective": data.get("objetivo"),
+        "activity_level": data.get("actividad_fisica"),
+        "source": "viaggio_dataset",
+        "_dataset_raw": data,
+    }
+
+
+def _record_timestamp(record: dict[str, Any]) -> float:
+    data = _dataset_data(record)
+    candidates: list[Any] = [
+        data.get("created_at"),
+        record.get("created_at"),
+        data.get("health_synced_at"),
+        data.get("ts"),
+    ]
+    for value in candidates:
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            value = float(value)
+            if value > 10_000_000_000:
+                value = value / 1000.0
+            return value
+        text = _as_text(value)
+        if not text:
+            continue
+        text = text.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _matching_dataset_records(dataset_url: str, document_number: str) -> list[dict[str, Any]]:
+    document = _as_text(document_number)
+    if not document:
+        return []
+    matches = []
+    for record in _request_dataset_records(dataset_url):
+        data = _dataset_data(record)
+        if _as_text(data.get("identificacion") or record.get("patient_internal_id")) == document:
+            matches.append(record)
+    return sorted(matches, key=_record_timestamp, reverse=True)
+
+
+def _summarize_food_entries(document_number: str) -> list[dict[str, Any]]:
+    settings = _settings()
+    summaries = []
+    for record in _matching_dataset_records(settings.external_viaggio_food_entries_dataset_url, document_number)[:3]:
+        data = _dataset_data(record)
+        summaries.append({
+            "meal_type": data.get("meal_type"),
+            "logged_food": data.get("logged_food"),
+            "calorie": data.get("calorie"),
+            "protein": data.get("protein"),
+            "total_carb": data.get("total_carb"),
+            "created_at": data.get("created_at") or record.get("created_at"),
+        })
+    return summaries
+
+
+def _summarize_conversations(document_number: str) -> list[dict[str, Any]]:
+    settings = _settings()
+    summaries = []
+    for record in _matching_dataset_records(settings.external_viaggio_conversaciones_dataset_url, document_number)[:3]:
+        data = _dataset_data(record)
+        summaries.append({
+            "tipo_mensaje": data.get("tipo_mensaje"),
+            "tipo_contenido": data.get("tipo_contenido"),
+            "contenido": _as_text(data.get("contenido"))[:300],
+            "created_at": data.get("created_at") or record.get("created_at"),
+        })
+    return summaries
+
+
+def _summarize_evalml(document_number: str) -> dict[str, Any]:
+    settings = _settings()
+    records = _matching_dataset_records(settings.external_viaggio_evalml_dataset_url, document_number)
+    if not records:
+        return {}
+    data = _dataset_data(records[0])
+    return {
+        "mg_estimada": data.get("mg"),
+        "bpm_estimado": data.get("bpm"),
+        "spo2_estimada": data.get("spo2"),
+        "confidence": data.get("confidence"),
+        "captured_at": data.get("created_at") or records[0].get("created_at"),
+        "advisory": (
+            "Estos datos provienen de estimaciones de la aplicacion y no sustituyen una medicion clinica. "
+            "Si el valor parece alto o preocupante, sugiere consultar a un profesional de salud."
+        ),
+    }
+
+
+def _summarize_data_step(document_number: str) -> dict[str, Any]:
+    settings = _settings()
+    records = _matching_dataset_records(settings.external_viaggio_data_step_dataset_url, document_number)
+    if not records:
+        return {}
+    data = _dataset_data(records[0])
+    return {
+        "steps": data.get("steps"),
+        "activity": data.get("activity"),
+        "heart_rate": data.get("heart_rate"),
+        "sleep_minutes": data.get("sleep_minutes"),
+        "health_source": data.get("health_source"),
+        "captured_at": data.get("health_synced_at") or data.get("ts") or records[0].get("created_at"),
+    }
+
+
+def get_patient_dataset_context(patient: dict | None) -> dict[str, Any]:
+    if not patient:
+        return {}
+    document_number = _as_text(patient.get("document_number") or patient.get("identificacion"))
+    if not document_number:
+        return {}
+    return {
+        "food_entries": _summarize_food_entries(document_number),
+        "conversations": _summarize_conversations(document_number),
+        "evalml": _summarize_evalml(document_number),
+        "data_step": _summarize_data_step(document_number),
+    }
+
+
 def _preview_row(row: dict | None) -> dict[str, Any]:
     if not row:
         return {}
@@ -121,6 +345,22 @@ def _pick_first_row(source: str, table: str, extra_params: dict[str, str] | None
     return rows[0] if rows else {}
 
 
+def _load_call_settings_from_source() -> tuple[dict[str, Any], str]:
+    settings = _settings()
+    if is_lovable_enabled():
+        row = _pick_first_row("lovable", settings.lovable_call_settings_table)
+        if row:
+            logger.info(
+                "Loaded call settings from Supabase lovable.%s: %s",
+                settings.lovable_call_settings_table,
+                _preview_row(row),
+            )
+            return row, "lovable"
+
+    logger.info("Call settings fallback in use: manual/default")
+    return {}, "fallback"
+
+
 @lru_cache(maxsize=32)
 def _get_lovable_hospital_name(hospital_id: str) -> str | None:
     settings = _settings()
@@ -137,18 +377,47 @@ def _get_lovable_hospital_name(hospital_id: str) -> str | None:
 
 
 def get_call_settings() -> dict:
+    global _call_settings_cache
+    global _call_settings_cache_loaded_at
+    global _call_settings_cache_source
+
+    now = time.monotonic()
+    if _call_settings_cache is not None and (now - _call_settings_cache_loaded_at) < _CALL_SETTINGS_CACHE_TTL_SECONDS:
+        return dict(_call_settings_cache)
+
+    row, source = _load_call_settings_from_source()
+    _call_settings_cache = dict(row)
+    _call_settings_cache_source = source
+    _call_settings_cache_loaded_at = now
+    return dict(_call_settings_cache)
+
+
+def get_call_settings_debug(refresh: bool = False) -> dict[str, Any]:
+    global _call_settings_cache
+    global _call_settings_cache_loaded_at
+    global _call_settings_cache_source
+
+    if refresh:
+        _call_settings_cache = None
+        _call_settings_cache_loaded_at = 0.0
+        _call_settings_cache_source = "uninitialized"
+
     settings = _settings()
-    if is_lovable_enabled():
-        row = _pick_first_row("lovable", settings.lovable_call_settings_table)
-        if row:
-            logger.info(
-                "Loaded call settings from Supabase lovable.%s: %s",
-                settings.lovable_call_settings_table,
-                _preview_row(row),
-            )
-            return row
-    logger.info("Call settings fallback in use: manual/default")
-    return {}
+    row = get_call_settings()
+    age_seconds = max(0.0, time.monotonic() - _call_settings_cache_loaded_at) if _call_settings_cache_loaded_at else None
+    return {
+        "enabled": is_lovable_enabled(),
+        "table": settings.lovable_call_settings_table,
+        "source": _call_settings_cache_source,
+        "using_fallback": _call_settings_cache_source != "lovable",
+        "cache_ttl_seconds": _CALL_SETTINGS_CACHE_TTL_SECONDS,
+        "cache_age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+        "row_preview": _preview_row(row),
+        "project_name": row.get("project_name") if row else CALL_SCRIPT.get("project_name"),
+        "voice_mode": row.get("voice_mode"),
+        "realtime_model": row.get("realtime_model"),
+        "knowledge_base_file": row.get("knowledge_base_file") if row else CALL_SCRIPT.get("knowledge_base_file"),
+    }
 
 
 def get_project_settings() -> dict:
@@ -167,21 +436,11 @@ def get_project_settings() -> dict:
 
 
 def get_voice_settings() -> dict:
-    settings = _settings()
-    if is_lovable_enabled():
-        row = _pick_first_row("lovable", settings.lovable_call_settings_table)
-        if row:
-            return row
-    return {}
+    return get_call_settings()
 
 
 def get_call_rules() -> dict:
-    settings = _settings()
-    if is_lovable_enabled():
-        row = _pick_first_row("lovable", settings.lovable_call_settings_table)
-        if row:
-            return row
-    return {}
+    return get_call_settings()
 
 
 def _enrich_patient(patient: dict | None) -> dict | None:
@@ -221,13 +480,10 @@ def _enrich_patient(patient: dict | None) -> dict | None:
 
 def list_backend_patients() -> list[dict]:
     settings = _settings()
-    if is_external_viaggio_enabled():
-        rows = _request_rows(
-            "viaggio",
-            settings.external_viaggio_pacientes_table,
-            {"select": "*", "order": "nombre.asc"},
-        )
-        return [_enrich_patient(row) for row in rows]
+    # Fuente principal: dataset de Viaggio (tablas directas eliminadas)
+    if settings.external_viaggio_pacientes_dataset_url:
+        rows = _request_dataset_records(settings.external_viaggio_pacientes_dataset_url)
+        return [_enrich_patient(_normalize_dataset_patient(row)) for row in rows]
     if is_lovable_enabled():
         rows = _request_rows(
             "lovable",
@@ -242,6 +498,7 @@ def find_backend_patient_by_phone(phone_number: str) -> dict | None:
     normalized = normalize_phone(phone_number)
     settings = _settings()
     candidates = _phone_candidates(phone_number)
+    dataset_mode = bool(settings.external_viaggio_pacientes_dataset_url)
     logger.info(
         "Looking up patient by phone: input=%s normalized=%s candidates=%s",
         phone_number,
@@ -249,32 +506,20 @@ def find_backend_patient_by_phone(phone_number: str) -> dict | None:
         candidates,
     )
 
-    if is_external_viaggio_enabled():
-        phone_fields = [
-            field.strip()
-            for field in settings.external_viaggio_patient_phone_fields.split(",")
-            if field.strip()
-        ] or ["numero"]
-        for field in phone_fields:
-            for candidate in candidates:
+    if settings.external_viaggio_pacientes_dataset_url:
+        for record in _request_dataset_records(settings.external_viaggio_pacientes_dataset_url):
+            patient = _normalize_dataset_patient(record)
+            patient_phone = patient.get("phone_number")
+            if patient_phone and any(patient_phone == normalize_phone(candidate) for candidate in candidates):
                 logger.info(
-                    "Trying patient lookup in Supabase viaggio.%s using field=%s value=%s",
-                    settings.external_viaggio_pacientes_table,
-                    field,
-                    candidate,
+                    "Patient found in Viaggio pacientes dataset: %s",
+                    _preview_row(patient),
                 )
-                rows = _request_rows(
-                    "viaggio",
-                    settings.external_viaggio_pacientes_table,
-                    {"select": "*", field: f"eq.{candidate}", "limit": "1"},
-                )
-                if rows:
-                    logger.info(
-                        "Patient found in Supabase viaggio.%s: %s",
-                        settings.external_viaggio_pacientes_table,
-                        _preview_row(rows[0]),
-                    )
-                    return _enrich_patient(rows[0])
+                return _enrich_patient(patient)
+        logger.info(
+            "No patient match found in Viaggio pacientes dataset for phone=%s",
+            normalized,
+        )
 
     if is_lovable_enabled():
         phone_fields = [
@@ -312,24 +557,21 @@ def list_backend_appointments(patient: dict | None, fallback_customer_id: int | 
         return []
 
     settings = _settings()
-    if is_lovable_enabled():
+
+    # Solo buscar citas en Lovable si el paciente proviene de Lovable.
+    # Si vino de Viaggio u otra fuente externa, su "id" es de esa fuente y
+    # no matchea en la tabla lovable.call_appointments → requests siempre fallidos.
+    patient_source = (patient.get("source") or "").lower()
+    lovable_patient = patient_source in ("lovable", "lovable_dataset", "") and is_lovable_enabled()
+
+    if lovable_patient:
         patient_id = patient.get("id") or patient.get("patient_id")
-        document_number = patient.get("document_number")
 
         if patient_id is not None:
             rows = _request_rows(
                 "lovable",
                 settings.lovable_call_appointments_table,
                 {"select": "*", "patient_id": f"eq.{patient_id}", "order": "appointment_date.asc"},
-            )
-            if rows:
-                return rows
-
-        if document_number:
-            rows = _request_rows(
-                "lovable",
-                settings.lovable_call_appointments_table,
-                {"select": "*", "document_number": f"eq.{document_number}", "order": "appointment_date.asc"},
             )
             if rows:
                 return rows
@@ -384,6 +626,126 @@ def get_active_call_script(script_name: str | None = None) -> dict:
     return script
 
 
+def _request_huella_rows_cached(table_name: str) -> list[dict[str, Any]]:
+    """Fetch all rows from a Huella table with in-process cache."""
+    now = time.monotonic()
+    cached = _huella_cache.get(table_name)
+    if cached and (now - cached[0]) < _HUELLA_CACHE_TTL_SECONDS:
+        return cached[1]
+    rows = _request_rows("huella", table_name, {"select": "*"})
+    _huella_cache[table_name] = (now, rows)
+    return rows
+
+
+def get_huella_visit_context(patient: dict | None) -> dict[str, Any]:
+    """Query Huella Delfos for field visit context of a patient.
+
+    Matches interviewees client-side against document_number or name to avoid
+    needing to know the exact column names of the remote table.
+    """
+    if not patient or not is_huella_enabled():
+        return {}
+
+    settings = _settings()
+    document_number = _as_text(patient.get("document_number") or patient.get("identificacion"))
+    full_name = _as_text(patient.get("full_name") or patient.get("nombre"))
+
+    if not document_number and not full_name:
+        return {}
+
+    # Fetch the full interviewees table (small dataset, cached 120 s)
+    all_interviewees = _request_huella_rows_cached(settings.huella_interviewees_table)
+    if not all_interviewees:
+        return {}
+
+    # Match client-side: document_number wins; name is fallback
+    interviewee_row: dict[str, Any] | None = None
+    for row in all_interviewees:
+        if document_number:
+            row_text_values = {_as_text(v) for v in row.values() if v is not None}
+            if document_number in row_text_values:
+                interviewee_row = row
+                break
+    if not interviewee_row and full_name:
+        first_word = full_name.lower().split()[0] if full_name else ""
+        for row in all_interviewees:
+            row_name = _as_text(
+                row.get("name") or row.get("nombre") or row.get("full_name") or ""
+            ).lower()
+            if first_word and (first_word in row_name or (row_name.split()[:1] or [""])[0] in full_name.lower()):
+                interviewee_row = row
+                break
+
+    if not interviewee_row:
+        logger.info(
+            "No Huella interviewee found for patient document=%s name=%s",
+            document_number,
+            full_name,
+        )
+        return {}
+
+    interviewee_id = interviewee_row.get("id")
+    interviewee: dict[str, Any] = {
+        "id": interviewee_id,
+        "name": interviewee_row.get("name") or interviewee_row.get("nombre") or interviewee_row.get("full_name"),
+        "document_number": document_number or interviewee_row.get("document_number") or interviewee_row.get("id_number"),
+        "municipality": interviewee_row.get("municipality") or interviewee_row.get("municipio"),
+    }
+    result: dict[str, Any] = {"interviewee": interviewee}
+
+    # Sessions (visits) — filter cached rows by interviewee_id
+    if interviewee_id is not None:
+        all_sessions = _request_huella_rows_cached(settings.huella_sessions_table)
+        interviewee_id_str = _as_text(interviewee_id)
+        matching_sessions = [
+            r for r in all_sessions
+            if _as_text(r.get("interviewee_id")) == interviewee_id_str
+        ]
+        matching_sessions = sorted(
+            matching_sessions,
+            key=lambda r: _as_text(r.get("created_at") or r.get("date") or ""),
+            reverse=True,
+        )[:3]
+
+        normalized_sessions = []
+        visitor_ids: set[str] = set()
+        for s in matching_sessions:
+            vid = s.get("visitor_id")
+            if vid is not None:
+                visitor_ids.add(_as_text(vid))
+            normalized_sessions.append({
+                "id": s.get("id"),
+                "date": s.get("date") or s.get("visit_date") or s.get("created_at"),
+                "type": s.get("type") or s.get("session_type") or s.get("visit_type"),
+                "observations": _as_text(
+                    s.get("observations") or s.get("notes") or s.get("observaciones") or ""
+                )[:400],
+                "status": s.get("status") or s.get("estado"),
+            })
+        result["sessions"] = normalized_sessions
+
+        # Visitors — filter cached rows by collected visitor_ids
+        if visitor_ids:
+            all_visitors = _request_huella_rows_cached(settings.huella_visitors_table)
+            visitors = []
+            for row in all_visitors:
+                if _as_text(row.get("id")) in visitor_ids:
+                    visitors.append({
+                        "id": row.get("id"),
+                        "name": row.get("name") or row.get("nombre"),
+                        "role": row.get("role") or row.get("rol") or row.get("position"),
+                    })
+            result["visitors"] = visitors
+
+    logger.info(
+        "Huella visit context loaded for patient %s: sessions=%d visitors=%d",
+        document_number or full_name,
+        len(result.get("sessions", [])),
+        len(result.get("visitors", [])),
+    )
+    return result
+
+
 def get_data_sources_contract() -> dict[str, Any]:
     settings = _settings()
     return {
@@ -406,15 +768,14 @@ def get_data_sources_contract() -> dict[str, Any]:
         },
         "external_viaggio": {
             "enabled": is_external_viaggio_enabled(),
-            "purpose": "Datos clinicos y de seguimiento replicados de Viaggio",
-            "tables": {
-                "pacientes": settings.external_viaggio_pacientes_table,
-                "patient_phone_fields": settings.external_viaggio_patient_phone_fields,
-                "food_entries": settings.external_viaggio_food_entries_table,
-                "conversaciones": settings.external_viaggio_conversaciones_table,
-                "meal_patterns": settings.external_viaggio_meal_patterns_table,
-                "evalml": settings.external_viaggio_evalml_table,
-                "data_step": settings.external_viaggio_data_step_table,
+            "purpose": "Datos clinicos y de seguimiento de Viaggio (solo via datasets, tablas directas eliminadas)",
+            "datasets": {
+                "pacientes": settings.external_viaggio_pacientes_dataset_url,
+                "food_entries": settings.external_viaggio_food_entries_dataset_url,
+                "conversaciones": settings.external_viaggio_conversaciones_dataset_url,
+                "evalml": settings.external_viaggio_evalml_dataset_url,
+                "data_step": settings.external_viaggio_data_step_dataset_url,
+                "call_transcripts": settings.external_viaggio_call_transcripts_dataset_url,
             },
         },
         "huella_delfos": {

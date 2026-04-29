@@ -19,6 +19,47 @@ _call_events: list[dict] = []
 _next_call_id = 1
 _next_event_id = 1
 
+# Caché de corta duración para pasar el contexto de paciente (construido desde
+# query params en /voice) al WebSocket handler, que no tiene acceso a la request.
+# Clave: call_sid  |  Valor: dict con full_name, phone_number, document_number, etc.
+_pending_call_params: dict[str, dict] = {}
+
+
+def store_pending_call_params(call_sid: str, customer: dict) -> None:
+    """Guarda el contexto de paciente construido desde params para que lo use el WS."""
+    _pending_call_params[call_sid] = customer
+
+
+def pop_pending_call_params(call_sid: str) -> dict | None:
+    """Recupera y elimina el contexto de paciente guardado para este call_sid."""
+    return _pending_call_params.pop(call_sid, None)
+
+
+# Registro permanente call_sid → {patient_name, patient_id, script_name}.
+# Se pobla desde /voice y /outbound cuando ya se conoce el paciente.
+# store_twilio_recording lo usa para asignar la carpeta correcta aunque el
+# WebSocket se haya cerrado antes de crear el CallAudioArchive.
+_call_patient_registry: dict[str, dict] = {}
+
+
+def register_call_patient(
+    call_sid: str,
+    patient_name: str | None,
+    patient_id: str | None,
+    script_name: str | None = None,
+) -> None:
+    """Registra datos del paciente asociados a un call_sid."""
+    _call_patient_registry[call_sid] = {
+        "patient_name": patient_name or "",
+        "patient_id": patient_id or "",
+        "script_name": script_name or "default",
+    }
+
+
+def get_call_patient(call_sid: str) -> dict | None:
+    """Devuelve los datos del paciente registrados para este call_sid, o None."""
+    return _call_patient_registry.get(call_sid)
+
 
 class CustomerRepository:
     def find_by_phone(self, phone_number: str) -> dict | None:
@@ -131,13 +172,21 @@ class CallEventRepository:
 class CallScriptRepository:
     def get_active_script(self, name: str = "default") -> dict | None:
         normalized = (name or "default").strip().lower()
-        if normalized == "default":
-            normalized = "seguimiento"
 
-        script = CALL_SCRIPTS.get(normalized)
-        if script and script.get("active"):
-            return script
+        # Si se pide un script por nombre específico, devolverlo aunque active=False.
+        # El flag active solo se usa para seleccionar el script por defecto cuando
+        # no se pide ninguno en particular.
+        if normalized and normalized != "default":
+            script = CALL_SCRIPTS.get(normalized)
+            if script:
+                return script
 
+        # Sin nombre específico: buscar el activo
+        for script in CALL_SCRIPTS.values():
+            if script.get("active"):
+                return script
+
+        # Fallback final al CALL_SCRIPT principal
         if CALL_SCRIPT.get("active"):
             return CALL_SCRIPT
         return None

@@ -1,22 +1,39 @@
 import re
-from datetime import datetime
+from datetime import datetime, date as _date
 from functools import lru_cache
 from pathlib import Path
 
-DEFAULT_SYSTEM_PROMPT = """Eres un asistente telefonico automatizado para seguimiento de salud.
+
+DEFAULT_SYSTEM_PROMPT = """Eres Andrea, una asistente telefonica automatizada para seguimiento de salud. Eres mujer.
+
+## Identidad
+- Tu nombre es Andrea. Eres mujer. Usa siempre genero femenino en todas tus expresiones.
+- Ejemplos correctos: "estoy dispuesta a ayudarte", "quedo atenta", "contenta de poder ayudarte", "estoy aqui para ayudarte".
+- Ejemplos INCORRECTOS (NUNCA uses estas formas): "estoy dispuesto", "quedo atento", "listo para ayudarte" con sentido masculino.
+- Si debes referirte a ti misma, usa siempre formas femeninas: "soy Andrea", "yo te puedo ayudar", "estoy dispuesta".
 
 ## Reglas
 - Habla de forma clara y breve.
 - No inventes datos. Usa solo la informacion entregada por el sistema.
-- Si falta informacion, dilo.
-- Si el usuario se sale del flujo, redirigelo amablemente.
-- Si hay duda, ofrece transferencia a un humano.
+- Si falta informacion, dilo con naturalidad: "en este momento no tengo ese dato disponible" o "eso pertenece a otra area y no lo tengo cargado aqui".
+- Si el usuario se sale del flujo o pregunta temas no relacionados con el seguimiento de salud del proyecto, redirigelo con amabilidad: "eso esta fuera de lo que puedo ayudarte aqui, pero con gusto continuamos con el seguimiento. ¿Como te has sentido?"
 - No prometas acciones no confirmadas.
 - Pide confirmacion antes de ejecutar cambios.
+- NUNCA digas que vas a transferir, comunicar o derivar al usuario con un humano, agente, asesor o persona. No existe esa opcion en esta llamada.
+- Si una pregunta esta fuera de tu alcance, di simplemente: "eso corresponde a otra area y no tengo esa informacion en este momento" o "no cuento con ese dato aqui, pero puedes consultarlo directamente con el equipo del proyecto".
+- No uses frases como: "te transfiero", "te comunico con un asesor", "un agente humano te atendra", "personal del proyecto te puede ayudar directamente en este momento".
+
+## Manejo de contenido inapropiado
+- Si el usuario hace comentarios sexuales, groseros, ofensivos o fuera de lugar, responde con calma y firmeza: "Prefiero que nos mantengamos en el tema del seguimiento. ¿Hay algo relacionado con el proyecto en lo que pueda ayudarte?"
+- Nunca respondas con contenido sexual, grosero ni ofensivo, sin importar lo que diga el usuario.
+- Nunca insultes, reacciones con enojo ni hagas comentarios personales negativos.
+- Manten siempre un tono calmado, respetuoso y profesional ante cualquier provocacion.
+- Si el usuario insiste con contenido inapropiado, cierra la llamada con: "Entiendo, te llamare en otro momento. Que estes muy bien, hasta luego."
 
 ## Estilo
 - Frases cortas.
-- Tono cordial, cercano y natural.
+- Tono cordial, cercano y natural — como una conversacion telefonica real entre personas.
+- NUNCA uses listas numeradas, viñetas, guiones como lista, asteriscos, negritas ni ningun otro formato markdown. Responde siempre de forma oral y natural, sin formato de texto.
 - Una pregunta a la vez.
 - Confirmar datos sensibles antes de continuar.
 - Evita sonar mecanico o demasiado formal.
@@ -30,9 +47,17 @@ DEFAULT_SYSTEM_PROMPT = """Eres un asistente telefonico automatizado para seguim
 - Despues de presentarte, usa expresiones como "el proyecto", "el seguimiento" o "la visita".
 """
 
-DEFAULT_WELCOME = (
-    "Hola, hablo con {call_name}?"
-)
+DEFAULT_WELCOME = "Hola, hablo con {call_name}?"
+
+
+def _format_huella_date(value: object) -> str:
+    if not value:
+        return ""
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return text[:10]
 
 
 def _clean_welcome_greeting(text: str) -> str:
@@ -54,7 +79,6 @@ def _clean_welcome_greeting(text: str) -> str:
 
 @lru_cache
 def load_knowledge_base(knowledge_base_file: str) -> str:
-    """Load a local markdown knowledge base for project-related questions."""
     path = Path(knowledge_base_file)
     if not path.is_absolute():
         path = Path.cwd() / path
@@ -65,16 +89,79 @@ def load_knowledge_base(knowledge_base_file: str) -> str:
         return ""
 
 
+class _SafeDict(dict):
+    """dict.format_map que deja intactos los placeholders desconocidos."""
+    def __missing__(self, key: str) -> str:
+        return f"{{{key}}}"
+
+
+_DAY_NAMES_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+
+def _build_temporal_context() -> str:
+    """Genera la sección de contexto temporal con fecha actual y días disponibles para agendar."""
+    now = datetime.now()
+    day_name = _DAY_NAMES_ES[now.weekday()]
+    date_str = now.strftime("%d/%m/%Y")
+    weekday = now.weekday()  # 0=lun … 6=dom
+
+    if weekday == 0:          # lunes
+        avail = "cualquier día de esta semana (lunes a viernes)"
+        avail_short = "cualquier día de esta semana"
+    elif weekday == 1:        # martes
+        avail = "de hoy martes a viernes de esta semana"
+        avail_short = "hoy martes, miércoles, jueves o viernes"
+    elif weekday == 2:        # miércoles
+        avail = "de hoy miércoles a viernes de esta semana"
+        avail_short = "hoy miércoles, jueves o viernes"
+    elif weekday == 3:        # jueves — semana casi cerrada
+        avail = "hoy jueves o mañana viernes"
+        avail_short = "hoy mismo o mañana viernes"
+    elif weekday == 4:        # viernes — último día hábil
+        avail = "hoy viernes o cualquier día de la próxima semana"
+        avail_short = "hoy mismo o la próxima semana"
+    else:                     # sábado o domingo
+        avail = "cualquier día de la próxima semana (lunes a viernes)"
+        avail_short = "cualquier día de la próxima semana"
+
+    return (
+        f"\n## Fecha y hora de la llamada\n"
+        f"- Hoy es {day_name} {date_str}.\n"
+        f"- Días disponibles para coordinar una visita: {avail}.\n"
+        f"- Al ofrecer opciones de día, usa esta frase de referencia: '{avail_short}'.\n"
+    )
+
+
 def build_context_prompt(
     customer: dict | None,
     appointments: list[dict],
     script: dict | None = None,
+    dataset_context: dict | None = None,
+    huella_context: dict | None = None,
 ) -> str:
-    """Build the full system prompt using the call script + customer data."""
     base_prompt = (script.get("system_prompt") if script else None) or DEFAULT_SYSTEM_PROMPT
     project_context = (script.get("project_context") if script else None) or ""
     knowledge_base_file = script.get("knowledge_base_file") if script else None
     knowledge_base = load_knowledge_base(knowledge_base_file) if knowledge_base_file else ""
+
+    # Reemplazar placeholders del script ({call_name}, {first_name}, etc.) con datos del paciente
+    if customer:
+        _first = (customer.get("full_name") or "").strip().split()
+        _first_name = _first[0] if _first else ""
+        try:
+            base_prompt = base_prompt.format_map(_SafeDict(
+                call_name=get_call_name(customer),
+                first_name=_first_name,
+                full_name=customer.get("full_name") or "",
+                project_name=(
+                    customer.get("project_name")
+                    or (script.get("project_name") if script else None)
+                    or "proyecto de diabetes mellitus tipo 2"
+                ),
+                hospital_name=customer.get("hospital_name") or "hospital correspondiente",
+            ))
+        except Exception:
+            pass  # si el formato falla, usar el prompt tal cual
 
     if not customer:
         prompt = (
@@ -86,6 +173,7 @@ def build_context_prompt(
             prompt += f"\n\n## Contexto del proyecto\n{project_context}"
         if knowledge_base:
             prompt += f"\n\n## Guia del proyecto\n{knowledge_base}"
+        prompt += _build_temporal_context()
         return prompt
 
     context = f"""
@@ -136,9 +224,60 @@ def build_context_prompt(
     if knowledge_base:
         context += f"\n## Guia del proyecto\n{knowledge_base}\n"
 
+    dataset_context = dataset_context or {}
+    food_entries = dataset_context.get("food_entries") or []
+    conversations = dataset_context.get("conversations") or []
+    evalml = dataset_context.get("evalml") or {}
+    data_step = dataset_context.get("data_step") or {}
+
+    if data_step:
+        context += "\n## Actividad fisica reciente\n"
+        context += f"- Pasos: {data_step.get('steps')}\n"
+        if data_step.get("activity"):
+            context += f"- Tipo de actividad: {data_step.get('activity')}\n"
+        if data_step.get("heart_rate") is not None:
+            context += f"- Frecuencia cardiaca estimada: {data_step.get('heart_rate')}\n"
+        if data_step.get("sleep_minutes") is not None:
+            context += f"- Minutos de sueno: {data_step.get('sleep_minutes')}\n"
+        if data_step.get("health_source"):
+            context += f"- Fuente: {data_step.get('health_source')}\n"
+
+    if evalml:
+        context += "\n## Mediciones recientes de la aplicacion\n"
+        if evalml.get("mg_estimada") is not None:
+            context += f"- Glucosa estimada: {evalml.get('mg_estimada')} mg/dL\n"
+        if evalml.get("bpm_estimado") is not None:
+            context += f"- Pulso estimado: {evalml.get('bpm_estimado')} bpm\n"
+        if evalml.get("spo2_estimada") is not None:
+            context += f"- Saturacion estimada: {evalml.get('spo2_estimada')}%\n"
+        if evalml.get("confidence") is not None:
+            context += f"- Confianza del modelo: {evalml.get('confidence')}\n"
+        context += (
+            "- Importante: estas mediciones son estimaciones de la aplicacion y no equivalen a un diagnostico "
+            "ni a una medicion clinica confirmada.\n"
+        )
+
+    if food_entries:
+        context += "\n## Registros recientes de alimentacion\n"
+        for item in food_entries:
+            context += (
+                f"- {item.get('meal_type') or 'comida'}: {item.get('logged_food') or 'sin detalle'}"
+                f" (calorias: {item.get('calorie')}, carbohidratos: {item.get('total_carb')}, proteina: {item.get('protein')})\n"
+            )
+
+    if conversations:
+        context += "\n## Conversaciones recientes\n"
+        for item in conversations:
+            context += (
+                f"- {item.get('tipo_mensaje') or 'mensaje'}: "
+                f"{(item.get('contenido') or '')[:220]}\n"
+            )
+
     hospital_name = customer.get("hospital_name")
     project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
     call_name = get_call_name(customer) or customer.get("full_name", "")
+    hospital_label = hospital_name or "hospital correspondiente"
+
     if hospital_name:
         context += (
             "\n## Instrucciones de presentacion\n"
@@ -169,19 +308,100 @@ def build_context_prompt(
     context += (
         "\n## Flujo exacto de apertura\n"
         f"- Primera intervencion exacta: 'Hola, hablo con {call_name}?'\n"
+        "- No esperes en silencio a que el usuario diga 'alo'. Tu debes iniciar hablando primero.\n"
         f"- Si la persona responde algo ambiguo como 'alo', 'si', 'quien habla', 'de parte de quien' o similar, todavia no asumas que ya confirmo identidad.\n"
-        f"- Si preguntan 'de parte de quien' o 'quien habla', responde: 'Hola, mucho gusto, te habla Andrea. Me comunico de parte del {hospital_name or 'hospital correspondiente'} por el {project_name}. ¿Hablo con {call_name}?'\n"
+        f"- Si preguntan 'de parte de quien' o 'quien habla', responde: 'Hola, mucho gusto, te habla Andrea. Me comunico de parte del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
         f"- Si la persona responde de forma ambigua como 'alo' o no se entiende, repite solo la confirmacion de identidad: 'Hola, hablo con {call_name}?'\n"
         f"- Si la persona confirma claramente con frases como 'si', 'si con el', 'soy yo', 'con el habla' o equivalente, no vuelvas a preguntar '¿Hablo con {call_name}?'.\n"
-        f"- Cuando ya quede confirmada la identidad, continua con una frase natural como: 'Que bueno, {call_name}. Me alegra saludarte. Te comento que esta llamada es para hacer seguimiento a la visita de campo y ver como va tu salud en el marco del proyecto. ¿Como te has sentido ultimamente?'\n"
+        f"- Cuando ya quede confirmada la identidad, tu siguiente respuesta debe incluir presentacion, hospital y proyecto antes de cualquier otra pregunta.\n"
+        f"- Usa una frase como: 'Que bueno, {call_name}. Mucho gusto, te habla Andrea. Me comunico de parte del {hospital_label} por el {project_name}. Esta llamada es para hacer seguimiento a la visita de campo y ver como va tu salud. ¿Como te has sentido ultimamente?'\n"
+        "- No omitas 'te habla Andrea' ni el nombre del hospital en esa primera respuesta despues de la confirmacion.\n"
         "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma primera respuesta salvo que la identidad ya este confirmada.\n"
+    )
+
+    # --- Huella Delfos: visita de campo ---
+    huella_context = huella_context or {}
+    huella_sessions = huella_context.get("sessions") or []
+    huella_visitors = huella_context.get("visitors") or []
+
+    if huella_sessions or huella_visitors:
+        context += "\n## Visita de campo (Huella)\n"
+        if huella_visitors:
+            visitor_names = ", ".join(v.get("name", "") for v in huella_visitors if v.get("name"))
+            visitor_roles = ", ".join(v.get("role", "") for v in huella_visitors if v.get("role"))
+            if visitor_names:
+                context += f"- Visitador(es) de campo: {visitor_names}\n"
+            if visitor_roles:
+                context += f"- Rol(es): {visitor_roles}\n"
+        for sess in huella_sessions:
+            date_val = _format_huella_date(sess.get("date"))
+            line = "- Visita"
+            if sess.get("type"):
+                line += f" ({sess['type']})"
+            if date_val:
+                line += f" el {date_val}"
+            if sess.get("status"):
+                line += f" — estado: {sess['status']}"
+            if sess.get("observations"):
+                line += f". Observaciones: {sess['observations']}"
+            context += line + "\n"
+    else:
+        context += (
+            "\n## Visita de campo (Huella)\n"
+            "- No se encontraron registros de visita de campo para este paciente en el sistema.\n"
+        )
+
+    context += (
+        "\n## Fuentes de apoyo para responder dudas\n"
+        "- Si el usuario pregunta por sus datos generales de paciente, perfil clinico, identificacion, municipio, IMC u otros datos base, usa la fuente conceptual de pacientes de Viaggio.\n"
+        "- Si el usuario pregunta por actividad fisica, pasos, movimiento, habitos diarios o seguimiento de actividad, usa la fuente conceptual de data_step.\n"
+        "- Si el usuario pregunta por mediciones, resultados, evaluaciones, indicadores o registros tomados en la app, usa la fuente conceptual de evalml.\n"
+        "- Si el usuario pregunta por conversaciones previas, mensajes o historial conversacional, usa la fuente conceptual de conversaciones.\n"
+        "- Si el usuario pregunta por alimentacion, comidas, registros de comida o seguimiento nutricional, usa la fuente conceptual de food_entries.\n"
+        "- Si el usuario pregunta por la visita domiciliaria, visita de campo, quien fue a la casa, cuando fue la visita, que se hizo en la visita o seguimiento del equipo en terreno, usa la fuente conceptual de Huella.\n"
+        "- Dentro de Huella, apoyate conceptualmente en interviewees para datos del entrevistado, sessions para sesiones o visitas registradas, y visitors para informacion del visitador o profesional de campo.\n"
+        "- Si el usuario pregunta por detalles de una visita pero el dato exacto no esta cargado en el contexto actual, dilo con honestidad: 'no tengo ese dato disponible en este momento, pero puede consultarlo directamente con el equipo del proyecto'.\n"
+        "- Si el usuario pregunta por DELFOS, Viaggio, Biomarcadores o por el aplicativo movil, responde con base en la guia del proyecto incluida en el sistema.\n"
+        "- Usa estas fuentes solo cuando el usuario lo pida o cuando sea realmente necesario para responder.\n"
+        "- Si en el contexto actual no tienes el dato concreto cargado, dilo con honestidad y no inventes valores.\n"
+        "- Cuando el usuario pregunte por un dato puntual de la plataforma, como IMC, pasos, pulso, saturacion, alimentacion o una medicion reciente, puedes responder primero con una frase natural como: 'voy a revisar en la plataforma' o 'ya consulto tu informacion en la base de datos', y enseguida dar la respuesta usando solo el contexto disponible.\n"
+        "- No finjas una espera larga ni digas que estas consultando si en realidad no tienes ese dato en el contexto. Si no esta disponible, di de forma simple que no lo ves cargado en este momento.\n"
+        "- Si el usuario pregunta por el numero de Viaggio o por el numero de WhatsApp del proyecto, y no tienes un numero distinto cargado en el contexto, responde que es el mismo canal desde el que le estan escribiendo o desde el que le escribieron despues de la visita.\n"
+        "- Si el usuario pregunta por el numero de Viaggio y si tienes que responder sin un numero exacto, usa una frase natural como: 'el numero de Viaggio es este mismo desde el que te escriben por WhatsApp o desde el que te contactaron despues de la visita'.\n"
+        "- No inventes un numero telefonico distinto si no aparece en el contexto actual.\n"
+        "- Si hablas de mg, bpm, spo2 o confidence, aclara que son estimaciones de la aplicacion y no un diagnostico confirmado.\n"
+        "- Si una estimacion parece preocupante, sugiere consultar a un profesional de salud sin alarmar al usuario ni presentar la app como diagnostico definitivo.\n"
+    )
+
+    # ── Contexto temporal (fecha actual + días disponibles) ─────────────────
+    context += _build_temporal_context()
+
+    # ── Manejo de preguntas sobre visitas ────────────────────────────────────
+    context += (
+        "\n## Manejo de preguntas sobre la próxima visita de campo\n"
+        "- Primero identifica el propósito de esta llamada: revisa el 'Contexto del proyecto' o el guion cargado.\n"
+        "- SI el propósito de esta llamada ES coordinar o agendar la próxima visita de campo:\n"
+        "  - Si el usuario pregunta cuándo es la visita, responde que precisamente para eso te estás comunicando.\n"
+        "  - Usa la sección 'Fecha y hora de la llamada' para ofrecer opciones concretas de días disponibles.\n"
+        "  - Antes de proponer los días, recuerda mencionar que te comunicas de parte del hospital.\n"
+        "  - Ejemplo natural: 'Te llamo de parte del [hospital] para coordinar la visita. ¿Qué día de esta semana te quedaría mejor? Podría ser [días disponibles].'\n"
+        "  - Si el usuario pregunta si puede ser un día que ya pasó esta semana, explica con amabilidad los días que aún quedan disponibles.\n"
+        "  - Si hoy es jueves o viernes y las opciones de esta semana son pocas, ofrece también la semana siguiente.\n"
+        "  - Si en la sección 'Visita de campo (Huella)' hay registros de una visita anterior, puedes mencionarla brevemente para dar contexto: 'como en la visita anterior, el equipo del proyecto pasará a verte en casa'.\n"
+        "  - Si Huella muestra que la visita anterior tiene observaciones relevantes (p. ej. citas, seguimiento pendiente), puedes referenciarlo con naturalidad al hablar del motivo de la nueva visita.\n"
+        "- SI el propósito de esta llamada es seguimiento (no agendar visita):\n"
+        "  - Si el usuario pregunta cuándo es la próxima visita, responde: 'En cualquier momento nos estaremos comunicando para coordinar esa visita contigo.'\n"
+        "  - Si en Huella hay datos de una visita anterior, puedes usar esa información para contextualizar el seguimiento: fecha, estado y observaciones de la última visita.\n"
+        "  - No intentes agendar ni dar fechas específicas si el guion no es de coordinación de visita.\n"
+        "- En ambos casos, usa el nombre del hospital del paciente si está disponible en el contexto.\n"
+        "- Si el usuario pregunta quién fue el visitador, usa los datos de la sección 'Visita de campo (Huella)' para responder con el nombre y rol del visitador registrado.\n"
+        "- Si Huella no tiene datos cargados, responde con honestidad: 'No tengo registros de visita disponibles en este momento, pero el equipo del proyecto tiene esa información.'\n"
     )
 
     return base_prompt + context
 
 
 def get_call_name(customer: dict | None) -> str:
-    """Return a natural spoken name, preferring first name + surname."""
     if not customer:
         return ""
 
@@ -198,7 +418,6 @@ def get_call_name(customer: dict | None) -> str:
 
 
 def get_welcome_greeting(script: dict | None = None, customer: dict | None = None) -> str:
-    """Get the welcome greeting from the script or use default."""
     if script and script.get("welcome_greeting"):
         greeting = script["welcome_greeting"]
         hospital_name = customer.get("hospital_name") if customer else ""
@@ -209,34 +428,44 @@ def get_welcome_greeting(script: dict | None = None, customer: dict | None = Non
         if customer:
             first_name = customer.get("full_name", "").strip().split()[0] or "hola"
             call_name = get_call_name(customer) or first_name
-            return _clean_welcome_greeting(greeting.format(
-                first_name=first_name,
-                call_name=call_name,
-                full_name=customer.get("full_name", ""),
+            return _clean_welcome_greeting(
+                greeting.format(
+                    first_name=first_name,
+                    call_name=call_name,
+                    full_name=customer.get("full_name", ""),
+                    project_name=project_name,
+                    hospital_name=hospital_name or "hospital de referencia",
+                )
+            )
+        return _clean_welcome_greeting(
+            greeting.format(
+                first_name="",
+                call_name="",
+                full_name="",
                 project_name=project_name,
                 hospital_name=hospital_name or "hospital de referencia",
-            ))
-        return _clean_welcome_greeting(greeting.format(
-            first_name="",
-            call_name="",
-            full_name="",
-            project_name=project_name,
-            hospital_name=hospital_name or "hospital de referencia",
-        ))
+            )
+        )
+
     if customer:
         first_name = customer.get("full_name", "").strip().split()[0] or "hola"
         call_name = get_call_name(customer) or first_name
         project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
         hospital_name = customer.get("hospital_name") or "hospital de referencia"
-        return _clean_welcome_greeting(DEFAULT_WELCOME.format(
-            first_name=first_name,
-            call_name=call_name,
-            project_name=project_name,
-            hospital_name=hospital_name,
-        ))
-    return _clean_welcome_greeting(DEFAULT_WELCOME.format(
-        first_name="",
-        call_name="",
-        project_name="proyecto de diabetes mellitus tipo 2",
-        hospital_name="hospital de referencia",
-    ))
+        return _clean_welcome_greeting(
+            DEFAULT_WELCOME.format(
+                first_name=first_name,
+                call_name=call_name,
+                project_name=project_name,
+                hospital_name=hospital_name,
+            )
+        )
+
+    return _clean_welcome_greeting(
+        DEFAULT_WELCOME.format(
+            first_name="",
+            call_name="",
+            project_name="proyecto de diabetes mellitus tipo 2",
+            hospital_name="hospital de referencia",
+        )
+    )

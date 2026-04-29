@@ -13,6 +13,7 @@ router = APIRouter(tags=["calls"])
 class CallTriggerRequest(BaseModel):
     phone_number: str
     patient_name: str | None = None
+    patient_document_number: str | None = None
     source: str | None = "frontend"
     script_name: str | None = "default"
 
@@ -36,7 +37,12 @@ async def get_call(call_sid: str):
 async def trigger_call(payload: CallTriggerRequest):
     """Trigger an outbound call from the admin frontend using JSON."""
     try:
-        call_sid = await make_outbound_call(payload.phone_number, payload.script_name or "default")
+        call_sid = await make_outbound_call(
+            payload.phone_number,
+            payload.script_name or "default",
+            patient_name=payload.patient_name or "",
+            patient_document_number=payload.patient_document_number or "",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TwilioRestException as exc:
@@ -49,11 +55,13 @@ async def trigger_call(payload: CallTriggerRequest):
         customer_id=customer["id"] if customer else None,
     )
 
+    resolved_name = (customer or {}).get("full_name") or payload.patient_name
     return {
         "status": "initiated",
         "call_sid": call_sid,
         "to": payload.phone_number,
-        "patient_name": (customer or {}).get("full_name") or payload.patient_name,
+        "patient_name": resolved_name,
+        "patient_document_number": payload.patient_document_number,
         "source": payload.source,
         "script_name": payload.script_name or "default",
     }

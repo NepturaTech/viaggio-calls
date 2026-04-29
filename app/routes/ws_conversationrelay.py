@@ -6,14 +6,26 @@ import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.db.repositories import CallRepository, CallScriptRepository
-from app.services.call_log_service import append_transcript_line, finalize_call, log_call_event
+from app.db.repositories import CallRepository, pop_pending_call_params
+from app.services.call_log_service import (
+    append_transcript_line,
+    finalize_call,
+    log_call_event,
+    update_call_log_context,
+)
 from app.services.customer_service import get_customer_context
-from app.services.openai_service import generate_response
+from app.services.openai_service import (
+    MODERATION_CLOSE_RESPONSE,
+    MODERATION_REDIRECT_RESPONSE,
+    generate_response,
+    moderate_user_input,
+)
 from app.services.prompt_service import build_context_prompt
+from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
 from app.services.realtime_service import connect_realtime, request_initial_greeting
-from app.services.twilio_service import hangup_call
+from app.services.supabase_rest_service import get_active_call_script, get_huella_visit_context, get_patient_dataset_context
+from app.services.twilio_service import hangup_call, start_call_recording
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +47,15 @@ class ConversationSession:
         self.call_sid: str | None = None
         self.pending_hangup: bool = False
         self.script_name: str = "default"
+        self.initial_greeting_completed: bool = False
+        self.violation_count: int = 0
+        # Context loading is started in background at setup so the WebSocket loop
+        # stays active (receives Twilio messages) while Viaggio/Huella fetches run.
+        self._context_future: asyncio.Future | None = None
+        self._context_loaded: bool = False
+        # Noise / short input handling: when True the previous bot turn was "¿Disculpa?"
+        # and we are waiting for the user to either clarify or confirm "nada".
+        self._disculpa_pending: bool = False
 
     def add_user_message(self, text: str):
         self.conversation_history.append({"role": "user", "content": text})
@@ -48,20 +69,78 @@ FAREWELL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Entradas de ruido / muy cortas que deben disparar "¿Disculpa?" en lugar de ir a GPT.
+_NOISE_SET: frozenset[str] = frozenset({
+    "ah", "eh", "mm", "hmm", "um", "uh", "hm", "m", "a", "e", "o",
+    "mhm", "ajá", "aja", "aah", "ahem",
+})
+
+# Respuestas que el usuario da después de un "¿Disculpa?" para aclarar que no dijo nada.
+# En ese caso simplemente se descarta la entrada y se continúa sin llamar a GPT.
+_DISCULPA_CONTINUATION = re.compile(
+    r"^(?:no[,.]?\s*)?(?:no\s+dije\s+nada|nada|no\s+es\s+nada|no\s+fue\s+nada|nada\s+gracias|no\s+nada|nada[,.]?\s*gracias)\.?\s*$",
+    re.IGNORECASE,
+)
+
+# Frases típicas de buzón de voz / contestador automático.
+# Si el STT transcribe alguna de estas, es casi seguro que nadie contestó en persona.
+# Se busca también en textos parciales/cortados que el STT puede entregar fragmentados.
+VOICEMAIL_PATTERN = re.compile(
+    r"deja\s+(?:tu|un)\s+mensaje"
+    r"|dejar\s+(?:un|su|tu)\s+mensaje"
+    r"|para\s+dejar\s+(?:un|su|tu)\s+mensaje"
+    r"|deja\s+tu\s+recado"
+    r"|dejar\s+su\s+recado"
+    r"|despu[eé]s\s+de\s+(?:escuchar\s+el\s+tono|la\s+se[nñ]al)"
+    r"|despu[eé]s\s+del\s+tono"
+    r"|al\s+escuchar\s+el\s+tono"
+    r"|escuche\s+el\s+tono"
+    r"|buz[oó]n\s+de\s+voz"
+    r"|contestador\s+autom[aá]tico"
+    r"|mensaje\s+de\s+voz\s+guardado"
+    r"|mensaje\s+de\s+voz"
+    r"|correo\s+de\s+voz"
+    r"|para\s+finalizar\s+presi[oó]n"
+    r"|para\s+finalizar\s+presione"
+    r"|presion[ae]\s+la\s+tecla\s+numeral"
+    r"|presione\s+sostenido"
+    r"|marque\s+la\s+tecla"
+    r"|oprima\s+la\s+tecla"
+    r"|volver\s+a\s+grabar"
+    r"|grab[ae]\s+(?:tu|su)\s+mensaje"
+    r"|grabar\s+(?:tu|su)\s+mensaje"
+    r"|al\s+terminar\s+(?:la\s+)?grabaci[oó]n"
+    r"|su\s+grabaci[oó]n\s+(?:ha\s+sido|fue)\s+guardada"
+    r"|no\s+(?:se\s+encuentra|est[aá])\s+disponible"
+    r"|en\s+este\s+momento\s+no\s+(?:puedo|puede)\s+atender"
+    r"|no\s+puedo\s+contestar\s+en\s+este\s+momento"
+    r"|su\s+llamada\s+ha\s+sido"
+    r"|escuchar\s+el\s+siguiente\s+mensaje"
+    r"|(?:presione|marque|oprima)\s+(?:el\s+)?(?:[0-9#*]|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|cero)"
+    r"|\bguardado\b.{0,40}\bmensaje\b"
+    r"|\bmensaje\b.{0,40}\bguardado\b",
+    re.IGNORECASE,
+)
+
 
 def _should_end_call(text: str) -> bool:
     return bool(text and FAREWELL_PATTERN.search(text))
 
 
-async def _hangup_after_response(call_sid: str | None):
+def _is_voicemail(text: str) -> bool:
+    return bool(text and VOICEMAIL_PATTERN.search(text))
+
+
+async def _hangup_after_response(call_sid: str | None, delay: float = 1.2, reason: str = "farewell"):
     if not call_sid:
         return
-    await asyncio.sleep(1.2)
+    if delay > 0:
+        await asyncio.sleep(delay)
     try:
         hangup_call(call_sid)
-        logger.info("Call %s completed after farewell detection", call_sid)
+        logger.info("Call %s hung up (reason=%s)", call_sid, reason)
     except Exception:
-        logger.exception("Failed to complete call %s after farewell detection", call_sid)
+        logger.exception("Failed to hang up call %s (reason=%s)", call_sid, reason)
 
 
 def _load_call_record(call_sid: str) -> tuple[dict | None, int | None]:
@@ -74,12 +153,103 @@ def _load_call_record(call_sid: str) -> tuple[dict | None, int | None]:
 
 def _load_session_context(session: ConversationSession):
     customer, appointments = get_customer_context(session.customer_phone or "")
+
+    # Si el paciente no está en la BD pero se construyó desde query params en /voice,
+    # recuperarlo desde la caché de corta duración (se elimina al leerlo).
+    if not customer and session.call_sid:
+        cached = pop_pending_call_params(session.call_sid)
+        if cached:
+            customer = cached
+            appointments = []
+            logger.info(
+                "=== PACIENTE (desde caché de params) === nombre=%s documento=%s",
+                cached.get("full_name"),
+                cached.get("document_number"),
+            )
+
     session.customer_name = customer["full_name"] if customer else None
     session.patient_id = str(customer.get("document_number") or "") if customer else None
 
-    script_repo = CallScriptRepository()
-    session.script = script_repo.get_active_script(session.script_name or "default")
-    session.system_prompt = build_context_prompt(customer, appointments, session.script)
+    # ── Paciente ────────────────────────────────────────────────────────────
+    if customer:
+        logger.info(
+            "=== PACIENTE ===\n"
+            "  nombre:       %s\n"
+            "  documento:    %s\n"
+            "  telefono:     %s\n"
+            "  municipio:    %s\n"
+            "  hospital:     %s\n"
+            "  imc:          %s\n"
+            "  findrisc:     %s\n"
+            "  edad:         %s\n"
+            "  sexo:         %s\n"
+            "  fuente:       %s\n"
+            "  citas:        %d",
+            customer.get("full_name"),
+            customer.get("document_number") or "no encontrado",
+            customer.get("phone_number"),
+            customer.get("municipality") or "sin municipio",
+            customer.get("hospital_name") or "sin hospital",
+            customer.get("imc") or "—",
+            customer.get("findrisc") or "—",
+            customer.get("age") or "—",
+            customer.get("sex") or "—",
+            customer.get("source"),
+            len(appointments),
+        )
+    else:
+        logger.warning("=== PACIENTE === no encontrado para telefono=%s", session.customer_phone)
+
+    # ── Script ──────────────────────────────────────────────────────────────
+    # Cargar script desde Supabase (Lovable call_scripts) con fallback a manual_data.py
+    session.script = get_active_call_script(session.script_name or "default")
+    logger.info(
+        "=== SCRIPT ===\n"
+        "  nombre:         %s\n"
+        "  saludo:         %s\n"
+        "  prompt (chars): %d",
+        session.script.get("name") if session.script else "none",
+        (session.script.get("welcome_greeting") or "")[:80] if session.script else "—",
+        len(session.script.get("system_prompt") or "") if session.script else 0,
+    )
+
+    # ── Datasets Viaggio ────────────────────────────────────────────────────
+    dataset_context = get_patient_dataset_context(customer)
+    logger.info(
+        "=== DATASET VIAGGIO ===\n"
+        "  food_entries:   %d registros\n"
+        "  conversations:  %d registros\n"
+        "  evalml:         %s\n"
+        "  data_step:      %s",
+        len(dataset_context.get("food_entries") or []),
+        len(dataset_context.get("conversations") or []),
+        "sí" if dataset_context.get("evalml") else "vacío",
+        "sí" if dataset_context.get("data_step") else "vacío",
+    )
+
+    # ── Huella ──────────────────────────────────────────────────────────────
+    huella_context = get_huella_visit_context(customer)
+    logger.info(
+        "=== HUELLA ===\n"
+        "  interviewee:    %s\n"
+        "  sesiones:       %d\n"
+        "  visitadores:    %d",
+        (huella_context.get("interviewee") or {}).get("name") or "no encontrado",
+        len(huella_context.get("sessions") or []),
+        len(huella_context.get("visitors") or []),
+    )
+
+    # ── Prompt final ────────────────────────────────────────────────────────
+    session.system_prompt = build_context_prompt(
+        customer, appointments, session.script, dataset_context, huella_context
+    )
+    logger.info(
+        "=== PROMPT CONSTRUIDO ===\n"
+        "  total chars: %d\n"
+        "  preview:\n%s",
+        len(session.system_prompt),
+        session.system_prompt[:600].replace("\n", "\n    "),
+    )
     return customer, appointments
 
 
@@ -88,8 +258,25 @@ async def conversation_relay_ws(websocket: WebSocket):
     """WebSocket endpoint for Twilio ConversationRelay."""
     await websocket.accept()
     session = ConversationSession()
+    # script_name viaja como query param en la URL del WebSocket generada por el TwiML
+    session.script_name = (websocket.query_params.get("script_name") or "default").strip()
+    archive: CallAudioArchive | None = None
+    archive_finalized = False
+    loop = asyncio.get_event_loop()
+    final_status = "completed"
 
-    logger.info("ConversationRelay WebSocket connected")
+    logger.info("ConversationRelay WebSocket connected (script=%s)", session.script_name)
+
+    def finalize_archive_once():
+        nonlocal archive_finalized, archive
+        if archive is None or archive_finalized:
+            return
+        try:
+            archive.close()
+            archive_finalized = True
+            logger.info("Audio archive finalized for call %s", session.call_sid)
+        except Exception as exc:
+            logger.error("Failed to finalize audio archive: %s", exc, exc_info=True)
 
     try:
         while True:
@@ -105,20 +292,31 @@ async def conversation_relay_ws(websocket: WebSocket):
                 session.direction = event.get("direction", "")
                 from_number = event.get("from", "")
                 to_number = event.get("to", "")
-                session.customer_phone = to_number if session.direction == "outbound" else from_number
+                # "outbound-api" → llamada saliente programática.
+                # En saliente: from=Twilio, to=paciente → usamos to_number.
+                # En entrante: from=paciente, to=Twilio → usamos from_number.
+                session.customer_phone = to_number if "outbound" in session.direction else from_number
 
                 _, session.call_id = _load_call_record(call_sid)
-                _load_session_context(session)
+
+                # CLAVE: lanzar la carga de contexto en background SIN awaitar.
+                # _load_session_context hace 4+ fetches HTTP síncronos (Viaggio, Huella,
+                # Lovable) con timeouts de 20 s cada uno. Si lo awaitamos aquí el
+                # WebSocket deja de recibir mensajes de Twilio y Twilio cierra la conexión.
+                # El primer handler de `prompt` awaitará el future antes de llamar a GPT.
+                session._context_future = loop.run_in_executor(None, _load_session_context, session)
+
+                # Para llamadas entrantes: iniciar grabación ahora (no necesita contexto).
+                if "outbound" not in session.direction and _get_settings().twilio_recording_enabled:
+                    loop.run_in_executor(None, start_call_recording, call_sid)
 
                 if session.call_id:
                     log_call_event(session.call_id, "setup", event)
 
                 logger.info(
-                    "Session setup: call_sid=%s, direction=%s, phone=%s, script=%s",
-                    call_sid,
-                    session.direction,
-                    session.customer_phone,
-                    session.script.get("name") if session.script else "default",
+                    "Session setup started (context loading in background): "
+                    "call_sid=%s direction=%s phone=%s script=%s",
+                    call_sid, session.direction, session.customer_phone, session.script_name,
                 )
 
             elif event_type == "prompt":
@@ -126,29 +324,155 @@ async def conversation_relay_ws(websocket: WebSocket):
                 if not user_text.strip():
                     continue
 
-                logger.info("User said: %s", user_text)
-                session.add_user_message(user_text)
+                turn = len(session.conversation_history) // 2 + 1
+                logger.info("=== TURNO %d — USUARIO ===\n  %s", turn, user_text)
 
+                # ── Detección de buzón de voz — PRIMERO, antes de cualquier await ──
+                # Se chequea ANTES de esperar el contexto para colgar de inmediato
+                # sin desperdiciar tiempo en fetches de Viaggio ni en llamadas a GPT.
+                if _is_voicemail(user_text):
+                    logger.warning(
+                        "Voicemail detected via transcript — hanging up. call=%s text=%r",
+                        session.call_sid, user_text[:150],
+                    )
+                    if session.call_id:
+                        log_call_event(session.call_id, "voicemail_detected", {"text": user_text})
+                        finalize_call(session.call_id, "voicemail")
+                    final_status = "voicemail"
+                    asyncio.create_task(_hangup_after_response(session.call_sid, delay=0.3, reason="voicemail"))
+                    break
+                # ────────────────────────────────────────────────────────────
+
+                # ── Esperar a que el contexto esté listo (solo en el primer turno) ──
+                if not session._context_loaded:
+                    if session._context_future is not None:
+                        logger.info("First prompt — waiting for context to finish loading (call=%s)…",
+                                    session.call_sid)
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(session._context_future), timeout=45.0
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("Context loading timed out for call %s; proceeding",
+                                           session.call_sid)
+                        except Exception as exc:
+                            logger.error("Context loading failed for call %s: %s", session.call_sid, exc)
+                        session._context_future = None
+                    session._context_loaded = True
+
+                    # Si el prompt quedó vacío (timeout o error en la carga), usar fallback
+                    # para que el bot siga el script en lugar de responder genéricamente.
+                    if not session.system_prompt:
+                        from app.services.prompt_service import DEFAULT_SYSTEM_PROMPT
+                        session.system_prompt = (
+                            (session.script.get("system_prompt") if session.script else None)
+                            or DEFAULT_SYSTEM_PROMPT
+                        )
+                        logger.warning(
+                            "Empty system_prompt after context load — using fallback script/DEFAULT prompt (call=%s)",
+                            session.call_sid,
+                        )
+
+                    # Crear archive y enriquecer log ahora que tenemos datos del paciente
+                    archive = CallAudioArchive(
+                        session.call_sid,
+                        session.customer_name,
+                        session.patient_id,
+                        session.script_name or "default",
+                        mode="conversation_relay",
+                    )
+                    loop.run_in_executor(
+                        None, update_call_log_context,
+                        session.call_sid,
+                        session.patient_id or None,
+                        session.customer_name or None,
+                        session.script_name or None,
+                    )
+                    logger.info(
+                        "Context ready — archive created for call %s (patient=%s script=%s)",
+                        session.call_sid, session.customer_name, session.script_name,
+                    )
+                # ─────────────────────────────────────────────────────────────
+
+                # ── Detección de ruido / entrada muy corta ──────────────────
+                _stripped = user_text.strip()
+                _lower = _stripped.lower()
+
+                # Si el turno anterior fue "¿Disculpa?" y el usuario aclara "nada":
+                # descartar silenciosamente y seguir sin tocar el historial ni llamar a GPT.
+                if session._disculpa_pending and (
+                    _DISCULPA_CONTINUATION.match(_stripped) or len(_stripped) <= 2
+                ):
+                    session._disculpa_pending = False
+                    logger.info(
+                        "Noise continuation after ¿Disculpa? — discarding input (call=%s text=%r)",
+                        session.call_sid, user_text,
+                    )
+                    continue
+
+                session._disculpa_pending = False  # reset para cualquier entrada real
+
+                # Entrada de ruido puro o de 1-2 caracteres → responder "¿Disculpa?"
+                # sin agregar al historial (el contexto de la conversación no cambia).
+                if len(_stripped) <= 2 or _lower in _NOISE_SET:
+                    session._disculpa_pending = True
+                    logger.info(
+                        "Noise/very-short input — responding with ¿Disculpa? (call=%s text=%r)",
+                        session.call_sid, user_text,
+                    )
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": "¿Disculpa?",
+                        "last": True,
+                    }))
+                    continue
+                # ─────────────────────────────────────────────────────────────
+
+                session.add_user_message(user_text)
                 if session.call_id:
                     log_call_event(session.call_id, "user_speech", {"text": user_text})
+                    append_transcript_line(session.call_id, "user", user_text)
+                if archive is not None:
+                    archive.append_transcript("user", user_text)
 
-                session.pending_hangup = _should_end_call(user_text)
-                ai_response = await generate_response(
-                    session.system_prompt,
-                    session.conversation_history[:-1],
-                    user_text,
-                )
+                # ── Moderación de contenido ──────────────────────────────────
+                is_flagged, flag_category = await moderate_user_input(user_text)
+                if is_flagged:
+                    session.violation_count += 1
+                    logger.warning(
+                        "Contenido inapropiado detectado (violation=%d, category=%s) call=%s",
+                        session.violation_count, flag_category, session.call_sid,
+                    )
+                    if session.violation_count >= 2:
+                        ai_response = MODERATION_CLOSE_RESPONSE
+                        session.pending_hangup = True
+                    else:
+                        ai_response = MODERATION_REDIRECT_RESPONSE
+                else:
+                    session.pending_hangup = _should_end_call(user_text)
+                    ai_response = await generate_response(
+                        session.system_prompt,
+                        session.conversation_history[:-1],
+                        user_text,
+                    )
+                # ────────────────────────────────────────────────────────────
 
                 session.add_assistant_message(ai_response)
+                logger.info("=== TURNO %d — MODELO ===\n  %s", turn, ai_response)
 
                 if session.call_id:
                     log_call_event(session.call_id, "ai_response", {"text": ai_response})
+                    append_transcript_line(session.call_id, "assistant", ai_response)
+                if archive is not None:
+                    archive.append_transcript("assistant", ai_response)
 
+                # IMPORTANTE: NO enviar "lang" en la respuesta.
+                # Twilio usa el idioma configurado en el TwiML (es-CO).
+                # Si se envía "lang: es-US" y el TwiML dice "es-CO", Twilio lanza error 64106.
                 response_payload = json.dumps({
                     "type": "text",
                     "token": ai_response,
                     "last": True,
-                    "lang": "es-US",
                 })
                 await websocket.send_text(response_payload)
                 if session.pending_hangup:
@@ -174,18 +498,24 @@ async def conversation_relay_ws(websocket: WebSocket):
                 logger.warning("Unknown event type: %s", event_type)
 
     except WebSocketDisconnect:
-        logger.info("ConversationRelay WebSocket disconnected")
-        if session.call_id:
-            summary = " | ".join(
-                f"{m['role']}: {m['content'][:100]}"
-                for m in session.conversation_history[-6:]
-            )
-            finalize_call(session.call_id, "completed", summary=summary)
+        logger.info("ConversationRelay WebSocket disconnected (call=%s)", session.call_sid)
 
-    except Exception as e:
-        logger.error("WebSocket error: %s", e, exc_info=True)
+    except Exception as exc:
+        logger.error("WebSocket error: %s", exc, exc_info=True)
+        final_status = "failed"
+
+    finally:
+        # Siempre finalizar el archive, sin importar cómo salió el loop
+        # (break por voicemail, desconexión de Twilio, excepción, o cierre normal).
+        finalize_archive_once()
         if session.call_id:
-            finalize_call(session.call_id, "failed", summary=str(e))
+            if final_status not in ("voicemail",):
+                summary = " | ".join(
+                    f"{m['role']}: {m['content'][:100]}"
+                    for m in session.conversation_history[-6:]
+                )
+                finalize_call(session.call_id, final_status, summary=summary or None)
+        logger.info("ConversationRelay session ended: call=%s status=%s", session.call_sid, final_status)
 
 
 @router.websocket("/realtime-media")
@@ -233,7 +563,7 @@ async def realtime_media_ws(websocket: WebSocket):
                 session.customer_phone = custom_parameters.get("customer_phone", "")
                 session.customer_name = custom_parameters.get("customer_name", "")
                 session.direction = custom_parameters.get("direction", "")
-                session.script_name = custom_parameters.get("script_name", "default")
+                session.script_name = (custom_parameters.get("script_name", "default") or "default").strip()
                 _load_session_context(session)
                 archive = CallAudioArchive(
                     call_sid,
@@ -333,6 +663,8 @@ async def realtime_media_ws(websocket: WebSocket):
                 transcript = event.get("transcript", "")
                 if transcript:
                     logger.info("Assistant said: %s", transcript)
+                    if not session.initial_greeting_completed:
+                        session.initial_greeting_completed = True
                     session.add_assistant_message(transcript)
                     if session.call_id:
                         log_call_event(session.call_id, "ai_response", {"text": transcript})
@@ -368,6 +700,9 @@ async def realtime_media_ws(websocket: WebSocket):
                     await _hangup_after_response(session.call_sid)
 
             elif event_type == "input_audio_buffer.speech_started" and stream_sid:
+                if not session.initial_greeting_completed:
+                    logger.info("Caller speech detected during initial greeting; preserving greeting audio")
+                    continue
                 await websocket.send_text(json.dumps({
                     "event": "clear",
                     "streamSid": stream_sid,

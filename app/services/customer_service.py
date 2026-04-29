@@ -29,9 +29,17 @@ def get_customer_context(phone_number: str) -> tuple[dict | None, list[dict]]:
         fallback_customer_id=manual_customer["id"] if manual_customer else None,
     )
 
+    resolved_source = (
+        customer.get("source")
+        or ("manual" if manual_customer and not backend_customer else "unknown")
+    )
+    resolved_document = customer.get("document_number") or customer.get("identificacion")
+
     logger.info(
-        "Found customer %s with %d upcoming appointments",
+        "Found customer %s with %d upcoming appointments (source=%s, document_number=%s)",
         customer["full_name"],
         len(appointments),
+        resolved_source,
+        resolved_document or "missing",
     )
     return customer, appointments
