@@ -30,3 +30,17 @@ lovable*.md
 dist/
 build/
 coverage/
+
+# Vercel CLI link + pulled env snapshots
+.vercel
+.env.vercel.*
+
+# Local-only env-sync helper scripts
+.sync_env.py
+.sync_env.sh
+.upload_env.py
+.fix_env.py
+.sync_plan.txt
+
+# OS
+.DS_Store
