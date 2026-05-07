@@ -77,6 +77,10 @@ class Settings(BaseSettings):
         "a nuestra politica de proteccion de datos."
     )
 
+    # Anthropic
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-haiku-4-5"
+
     # OpenAI
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"

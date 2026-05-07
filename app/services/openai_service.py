@@ -1,11 +1,11 @@
 import logging
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-client = AsyncOpenAI(api_key=settings.openai_api_key)
+client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 # Respuesta cuando se detecta contenido inapropiado por primera vez
 MODERATION_REDIRECT_RESPONSE = (
@@ -18,53 +18,14 @@ MODERATION_CLOSE_RESPONSE = (
     "Entiendo, te llamare en otro momento. Que estes muy bien, hasta luego."
 )
 
-# Categorías de la API de moderación que disparan la protección
-_FLAGGED_CATEGORIES = {
-    "sexual",
-    "sexual/minors",
-    "harassment",
-    "harassment/threatening",
-    "hate",
-    "hate/threatening",
-    "violence",
-    "violence/graphic",
-    "self-harm",
-    "self-harm/intent",
-    "self-harm/instructions",
-}
-
 
 async def moderate_user_input(text: str) -> tuple[bool, str]:
-    """Check user input against OpenAI Moderation API.
+    """Stub de moderación — siempre retorna sin marcar.
 
-    Returns (is_flagged, detected_category).
-    The moderation endpoint is free and does not count toward token usage.
+    La moderación via API externa fue desactivada (opción C).
+    El manejo de contenido inapropiado queda delegado al system prompt del modelo.
     """
-    if not settings.openai_api_key or not text.strip():
-        return False, ""
-    try:
-        result = await client.moderations.create(input=text)
-        output = result.results[0]
-        if output.flagged:
-            # Find the highest-scored flagged category for logging
-            scores = output.category_scores.model_dump()
-            top_category = max(
-                (cat for cat in _FLAGGED_CATEGORIES if scores.get(cat, 0) > 0),
-                key=lambda cat: scores.get(cat, 0),
-                default="unknown",
-            )
-            logger.warning(
-                "Moderation flagged user input. category=%s score=%.3f text_preview=%s",
-                top_category,
-                scores.get(top_category, 0),
-                text[:80],
-            )
-            return True, top_category
-        return False, ""
-    except Exception as exc:
-        # Si la moderación falla, no bloqueamos la llamada — solo logueamos
-        logger.warning("Moderation API error (non-blocking): %s", exc)
-        return False, ""
+    return False, ""
 
 
 async def generate_response(
@@ -72,25 +33,30 @@ async def generate_response(
     conversation_history: list[dict],
     user_message: str,
 ) -> str:
-    """Send conversation to OpenAI and return the assistant's text response."""
-    if not settings.openai_api_key:
-        logger.warning("OpenAI API key is not configured; using fallback response")
+    """Envía la conversación a Claude Haiku 4.5 y retorna la respuesta del asistente."""
+    if not settings.anthropic_api_key:
+        logger.warning("Anthropic API key is not configured; using fallback response")
         return "Lo siento, no tengo configurada la conexion con el modelo en este momento."
 
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(conversation_history)
+    # Construir historial sin el mensaje del sistema (va como parámetro separado)
+    messages = list(conversation_history)
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = await client.chat.completions.create(
-            model=settings.openai_model,
+        response = await client.messages.create(
+            model=settings.anthropic_model,
+            system=system_prompt,
             messages=messages,
             max_tokens=300,
             temperature=0.7,
         )
-        assistant_message = response.choices[0].message.content
-        logger.info("OpenAI response generated (%d tokens)", response.usage.total_tokens)
+        assistant_message = response.content[0].text
+        logger.info(
+            "Claude response generated (input=%d output=%d tokens)",
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+        )
         return assistant_message
     except Exception as e:
-        logger.error("OpenAI API error: %s", e)
+        logger.error("Claude API error: %s", e)
         return "Lo siento, estoy teniendo dificultades tecnicas en este momento."

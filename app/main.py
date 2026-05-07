@@ -35,7 +35,7 @@ settings = get_settings()
 cors_origins = [origin.strip() for origin in settings.cors_allow_origins.split(",") if origin.strip()]
 
 app = FastAPI(
-    title="Twilio ConversationRelay + GPT",
+    title="DELFOS Voice AI",
     description=(
         "Sistema de llamadas telefonicas con IA.\n\n"
         "Puede operar con datos manuales o con dos fuentes Supabase: "
@@ -311,11 +311,11 @@ async def root_page():
     </div>
     <div>
       <label>Modelo IA</label>
-      <span>GPT-4o</span>
+      <span>Claude Haiku 4.5</span>
     </div>
     <div>
       <label>TTS</label>
-      <span>ElevenLabs / OpenAI</span>
+      <span>ElevenLabs</span>
     </div>
     <div>
       <label>Almacenamiento</label>
