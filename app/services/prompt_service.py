@@ -293,6 +293,31 @@ def build_context_prompt(
     call_name = get_call_name(customer) or customer.get("full_name", "")
     hospital_label = hospital_name or "el hospital del proyecto"
 
+    # ── Tipo de llamada: se infiere del nombre del script ────────────────────
+    # seguimiento / default → visita de campo ya realizada, preguntar por salud
+    # proxima_visita        → coordinar segunda visita
+    # cualquier otro        → invitación / presentación del proyecto (nuevo usuario)
+    _sname = (script.get("name") or "").lower() if script else ""
+    _is_seguimiento = not _sname or _sname in ("seguimiento", "default") or "seguimiento" in _sname
+    _is_proxima_visita = "proxima_visita" in _sname or "proxima" in _sname
+    _is_invitacion = not _is_seguimiento and not _is_proxima_visita
+
+    # Razón de la llamada: usa project_context del script si está disponible
+    _ctx_pc = ((script.get("project_context") or "").split(".")[0].strip()[:200]) if script and script.get("project_context") else ""
+    _call_open_reason = (
+        _ctx_pc if _ctx_pc
+        else ("coordinar una próxima visita de campo" if _is_proxima_visita
+              else (f"contarte sobre {project_name} y cómo puede ayudarte" if _is_invitacion
+                    else "hacer seguimiento a la visita de campo y ver cómo va tu salud"))
+    )
+    _call_open_q = (
+        "¿Tienes un momento para que te cuente de qué se trata?"
+        if _is_invitacion
+        else ("¿Estarías disponible esta semana para recibir al equipo?"
+              if _is_proxima_visita
+              else "¿Cómo te has sentido últimamente?")
+    )
+
     if hospital_name:
         context += (
             "\n## Instrucciones de presentacion\n"
@@ -329,7 +354,7 @@ def build_context_prompt(
         f"- Si la persona responde de forma ambigua como 'alo' o no se entiende, repite solo la confirmacion de identidad: 'Hola, hablo con {call_name}?'\n"
         f"- Si la persona confirma claramente con frases como 'si', 'si con el', 'soy yo', 'con el habla' o equivalente, no vuelvas a preguntar '¿Hablo con {call_name}?'.\n"
         f"- Cuando ya quede confirmada la identidad, tu siguiente respuesta debe incluir presentacion, hospital y proyecto antes de cualquier otra pregunta.\n"
-        f"- Usa una frase como: 'Que bueno, {call_name}. Mucho gusto, te habla Andrea. Me comunico de parte del {hospital_label} por el {project_name}. Esta llamada es para hacer seguimiento a la visita de campo y ver como va tu salud. ¿Como te has sentido ultimamente?'\n"
+        f"- Usa una frase como: 'Que bueno, {call_name}. Mucho gusto, te habla Andrea. Me comunico de parte del {hospital_label} por el {project_name}. Te llamo para {_call_open_reason}. {_call_open_q}'\n"
         "- No omitas 'te habla Andrea' ni el nombre del hospital en esa primera respuesta despues de la confirmacion.\n"
         "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma primera respuesta salvo que la identidad ya este confirmada.\n"
     )
@@ -392,7 +417,8 @@ def build_context_prompt(
     context += _build_temporal_context()
 
     # ── Manejo de preguntas sobre visitas ────────────────────────────────────
-    context += (
+    if not _is_invitacion:
+      context += (
         "\n## Manejo de preguntas sobre la próxima visita de campo\n"
         "- Primero identifica el propósito de esta llamada: revisa el 'Contexto del proyecto' o el guion cargado.\n"
         "- SI el propósito de esta llamada ES coordinar o agendar la próxima visita de campo:\n"
@@ -413,7 +439,7 @@ def build_context_prompt(
         "- En ambos casos, usa SIEMPRE el hospital exacto de la sección 'Institución de esta llamada'. NUNCA uses frases genéricas como 'hospital correspondiente' o 'el hospital'.\n"
         "- Si el usuario pregunta quién fue el visitador, usa los datos de la sección 'Visita de campo (Huella)' para responder con el nombre y rol del visitador registrado.\n"
         "- Si Huella no tiene datos cargados, responde con honestidad: 'No tengo registros de visita disponibles en este momento, pero el equipo del proyecto tiene esa información.'\n"
-    )
+      )
 
     return base_prompt + context
 
