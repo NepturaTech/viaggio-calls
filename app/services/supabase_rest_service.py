@@ -85,7 +85,7 @@ def _request_rows(source: str, table: str, params: dict[str, str] | None = None)
 
     endpoint = f"{config['url']}/rest/v1/{table}"
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=5.0) as client:
             response = client.get(endpoint, headers=_headers(source), params=params or {})
             response.raise_for_status()
         data = response.json()
@@ -124,7 +124,7 @@ def _request_dataset_records(dataset_url: str) -> list[dict[str, Any]]:
         return cached[1]
 
     try:
-        with httpx.Client(timeout=20.0) as client:
+        with httpx.Client(timeout=5.0) as client:
             records: list[dict[str, Any]] = []
             offset = 0
             limit = 100
@@ -443,6 +443,36 @@ def get_call_rules() -> dict:
     return get_call_settings()
 
 
+def _find_lovable_patient_by_document(document_number: str) -> dict | None:
+    """Busca en la tabla call_patients de Lovable por número de documento
+    para recuperar hospital_id, hospital y municipio cuando el dataset de
+    Viaggio los devuelve nulos."""
+    if not document_number or not is_lovable_enabled():
+        return None
+    settings = _settings()
+    # La tabla usa 'identificacion' según el contrato de campos del frontend.
+    # Se intenta también 'document_number' como alternativa.
+    for field in ("identificacion", "document_number", "cedula"):
+        rows = _request_rows(
+            "lovable",
+            settings.lovable_call_patients_table,
+            {
+                "select": "hospital_id,hospital_name,hospital,municipio,municipality",
+                field: f"eq.{document_number}",
+                "limit": "1",
+            },
+        )
+        if rows:
+            logger.info(
+                "Hospital enrichment found in Lovable call_patients (field=%s doc=%s): %s",
+                field,
+                document_number,
+                {k: rows[0].get(k) for k in ("hospital_id", "hospital_name", "hospital", "municipio", "municipality")},
+            )
+            return rows[0]
+    return None
+
+
 def _enrich_patient(patient: dict | None) -> dict | None:
     if not patient:
         return None
@@ -468,7 +498,34 @@ def _enrich_patient(patient: dict | None) -> dict | None:
         if hospital_id:
             enriched["hospital_name"] = _get_lovable_hospital_name(str(hospital_id))
         else:
-            enriched["hospital_name"] = enriched.get("hospital") or infer_hospital_name(municipality or "")
+            # 1) Intentar inferir desde municipio local
+            inferred = infer_hospital_name(municipality or "")
+            if inferred:
+                enriched["hospital_name"] = inferred
+            else:
+                # 2) Si el dataset de Viaggio no trajo municipio/hospital, buscar en Lovable
+                #    usando el número de documento (fuente primaria del proyecto).
+                doc = _as_text(document_number or "")
+                lovable_row = _find_lovable_patient_by_document(doc) if doc else None
+                if lovable_row:
+                    h_id = lovable_row.get("hospital_id")
+                    if h_id:
+                        enriched["hospital_name"] = _get_lovable_hospital_name(str(h_id))
+                    if not enriched.get("hospital_name"):
+                        enriched["hospital_name"] = (
+                            lovable_row.get("hospital_name") or lovable_row.get("hospital") or None
+                        )
+                    # Enriquecer también el municipio si faltaba
+                    lovable_muni = (
+                        lovable_row.get("municipality") or lovable_row.get("municipio") or ""
+                    )
+                    if not enriched.get("municipality") and lovable_muni:
+                        enriched["municipality"] = lovable_muni
+                    # Último intento: inferir hospital desde municipio de Lovable
+                    if not enriched.get("hospital_name") and lovable_muni:
+                        enriched["hospital_name"] = infer_hospital_name(lovable_muni)
+                else:
+                    enriched["hospital_name"] = enriched.get("hospital") or None
 
     project_settings = get_project_settings()
     if project_settings and not enriched.get("project_name"):

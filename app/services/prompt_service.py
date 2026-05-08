@@ -158,7 +158,7 @@ def build_context_prompt(
                     or (script.get("project_name") if script else None)
                     or "proyecto de diabetes mellitus tipo 2"
                 ),
-                hospital_name=customer.get("hospital_name") or "hospital correspondiente",
+                hospital_name=customer.get("hospital_name") or "el hospital del proyecto",
             ))
         except Exception:
             pass  # si el formato falla, usar el prompt tal cual
@@ -190,7 +190,6 @@ def build_context_prompt(
         ("Edad", customer.get("age")),
         ("Sexo", customer.get("sex")),
         ("Municipio", customer.get("municipality")),
-        ("Hospital de referencia", customer.get("hospital_name")),
         ("IMC", customer.get("imc")),
         ("Dieta", customer.get("diet")),
         ("FINDRISC", customer.get("findrisc")),
@@ -199,6 +198,22 @@ def build_context_prompt(
     for label, value in extra_fields:
         if value:
             context += f"- {label}: {value}\n"
+
+    # ── Institución — bloque prominente para que el modelo lo use de forma exacta ──
+    _hospital = customer.get("hospital_name") or ""
+    _project = (
+        customer.get("project_name")
+        or (script.get("project_name") if script else None)
+        or "proyecto de diabetes mellitus tipo 2"
+    )
+    context += f"\n## Institución de esta llamada\n"
+    if _hospital:
+        context += f"- Hospital: {_hospital}\n"
+        context += f"- Al presentarte, di EXACTAMENTE: 'me comunico de parte del {_hospital}'.\n"
+        context += f"- NUNCA uses 'hospital correspondiente', 'hospital de referencia' ni ninguna frase genérica para el hospital. Usa SIEMPRE '{_hospital}'.\n"
+    else:
+        context += f"- Hospital: no disponible en el contexto actual. Di 'me comunico de parte del hospital del proyecto' si debes mencionarlo.\n"
+    context += f"- Proyecto: {_project}\n"
 
     if appointments:
         context += "\n## Citas proximas\n"
@@ -276,7 +291,7 @@ def build_context_prompt(
     hospital_name = customer.get("hospital_name")
     project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
     call_name = get_call_name(customer) or customer.get("full_name", "")
-    hospital_label = hospital_name or "hospital correspondiente"
+    hospital_label = hospital_name or "el hospital del proyecto"
 
     if hospital_name:
         context += (
@@ -298,8 +313,8 @@ def build_context_prompt(
         context += (
             "\n## Instrucciones de presentacion\n"
             f"- Presentate una sola vez al inicio por el {project_name}.\n"
-            "- Di que te comunicas de parte del hospital correspondiente.\n"
-            "- Si la persona confirma que si es ella, vuelve a mencionar de forma breve que llamas de parte del hospital antes de seguir.\n"
+            "- Di que te comunicas de parte del hospital del proyecto.\n"
+            "- Si la persona confirma que si es ella, vuelve a mencionar de forma breve que llamas de parte del hospital del proyecto antes de seguir.\n"
             "- No menciones Biomarcadores repetidamente.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Si el usuario quiere terminar, cierra de forma breve y amable.\n"
@@ -383,17 +398,19 @@ def build_context_prompt(
         "- SI el propósito de esta llamada ES coordinar o agendar la próxima visita de campo:\n"
         "  - Si el usuario pregunta cuándo es la visita, responde que precisamente para eso te estás comunicando.\n"
         "  - Usa la sección 'Fecha y hora de la llamada' para ofrecer opciones concretas de días disponibles.\n"
-        "  - Antes de proponer los días, recuerda mencionar que te comunicas de parte del hospital.\n"
-        "  - Ejemplo natural: 'Te llamo de parte del [hospital] para coordinar la visita. ¿Qué día de esta semana te quedaría mejor? Podría ser [días disponibles].'\n"
+        "  - Antes de proponer los días, usa el hospital exacto de la sección 'Institución de esta llamada' (NUNCA 'hospital correspondiente').\n"
+        "  - Ejemplo: 'Te llamo de parte del [hospital exacto] para coordinar la visita. ¿Qué día de esta semana te quedaría mejor? Podría ser [días disponibles].'\n"
         "  - Si el usuario pregunta si puede ser un día que ya pasó esta semana, explica con amabilidad los días que aún quedan disponibles.\n"
         "  - Si hoy es jueves o viernes y las opciones de esta semana son pocas, ofrece también la semana siguiente.\n"
+        "  - DESPUÉS de que el usuario confirme el día, pregunta también la hora: '¿Y a qué hora del día te quedaría mejor, en la mañana o en la tarde?' Si el usuario da una hora específica dentro del rango válido, acéptala. Si dice 'mañana', propone entre 8 a.m. y 12 m. Si dice 'tarde', propone entre 1 p.m. y 4 p.m. NUNCA sugieras ni aceptes visitas después de las 5 p.m.\n"
+        "  - Solo cuando tengas TANTO el día como la hora confirmados, cierra con: 'Perfecto, entonces el [día] a las [hora] el equipo del [hospital] pasará a visitarte. Que tengas un buen día.'\n"
         "  - Si en la sección 'Visita de campo (Huella)' hay registros de una visita anterior, puedes mencionarla brevemente para dar contexto: 'como en la visita anterior, el equipo del proyecto pasará a verte en casa'.\n"
         "  - Si Huella muestra que la visita anterior tiene observaciones relevantes (p. ej. citas, seguimiento pendiente), puedes referenciarlo con naturalidad al hablar del motivo de la nueva visita.\n"
         "- SI el propósito de esta llamada es seguimiento (no agendar visita):\n"
         "  - Si el usuario pregunta cuándo es la próxima visita, responde: 'En cualquier momento nos estaremos comunicando para coordinar esa visita contigo.'\n"
         "  - Si en Huella hay datos de una visita anterior, puedes usar esa información para contextualizar el seguimiento: fecha, estado y observaciones de la última visita.\n"
         "  - No intentes agendar ni dar fechas específicas si el guion no es de coordinación de visita.\n"
-        "- En ambos casos, usa el nombre del hospital del paciente si está disponible en el contexto.\n"
+        "- En ambos casos, usa SIEMPRE el hospital exacto de la sección 'Institución de esta llamada'. NUNCA uses frases genéricas como 'hospital correspondiente' o 'el hospital'.\n"
         "- Si el usuario pregunta quién fue el visitador, usa los datos de la sección 'Visita de campo (Huella)' para responder con el nombre y rol del visitador registrado.\n"
         "- Si Huella no tiene datos cargados, responde con honestidad: 'No tengo registros de visita disponibles en este momento, pero el equipo del proyecto tiene esa información.'\n"
     )

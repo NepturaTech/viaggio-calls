@@ -53,6 +53,11 @@ class ConversationSession:
         # stays active (receives Twilio messages) while Viaggio/Huella fetches run.
         self._context_future: asyncio.Future | None = None
         self._context_loaded: bool = False
+        # Snapshot del dict de paciente guardado en cuanto el lookup rápido termina
+        # (antes de los fetches lentos de Viaggio/Huella). Permite construir un prompt
+        # de fallback con nombre, hospital y proyecto reales si el contexto completo
+        # no llega a tiempo.
+        self._customer_snapshot: dict | None = None
         # Noise / short input handling: when True the previous bot turn was "¿Disculpa?"
         # and we are waiting for the user to either clarify or confirm "nada".
         self._disculpa_pending: bool = False
@@ -73,6 +78,11 @@ FAREWELL_PATTERN = re.compile(
 _NOISE_SET: frozenset[str] = frozenset({
     "ah", "eh", "mm", "hmm", "um", "uh", "hm", "m", "a", "e", "o",
     "mhm", "ajá", "aja", "aah", "ahem",
+})
+
+# Respuestas cortas perfectamente válidas que NUNCA deben detectarse como ruido.
+_VALID_SHORT: frozenset[str] = frozenset({
+    "sí", "si", "no", "ok", "ya", "claro", "dale", "bueno", "listo", "bien",
 })
 
 # Respuestas que el usuario da después de un "¿Disculpa?" para aclarar que no dijo nada.
@@ -169,6 +179,9 @@ def _load_session_context(session: ConversationSession):
 
     session.customer_name = customer["full_name"] if customer else None
     session.patient_id = str(customer.get("document_number") or "") if customer else None
+    # Guardar snapshot inmediatamente — los fetches lentos (Viaggio/Huella) vienen después.
+    # El fallback de prompt lo usa si el contexto completo no llega a tiempo.
+    session._customer_snapshot = customer if customer else None
 
     # ── Paciente ────────────────────────────────────────────────────────────
     if customer:
@@ -211,6 +224,20 @@ def _load_session_context(session: ConversationSession):
         session.script.get("name") if session.script else "none",
         (session.script.get("welcome_greeting") or "")[:80] if session.script else "—",
         len(session.script.get("system_prompt") or "") if session.script else 0,
+    )
+
+    # ── Prompt PRELIMINAR ───────────────────────────────────────────────────
+    # Se construye con los datos ya disponibles (paciente + script) antes de
+    # arrancar los fetches lentos de Viaggio/Huella.  Esto permite que el primer
+    # turno del WebSocket responda sin esperar el timeout de 8 s; los turnos
+    # siguientes usarán el prompt completo cuando el hilo de fondo termine.
+    session.system_prompt = build_context_prompt(
+        customer, appointments, session.script, {}, {}
+    )
+    logger.info(
+        "=== PROMPT PRELIMINAR ===\n"
+        "  chars: %d",
+        len(session.system_prompt),
     )
 
     # ── Datasets Viaggio ────────────────────────────────────────────────────
@@ -345,31 +372,49 @@ async def conversation_relay_ws(websocket: WebSocket):
 
                 # ── Esperar a que el contexto esté listo (solo en el primer turno) ──
                 if not session._context_loaded:
-                    if session._context_future is not None:
+                    if session._context_future is not None and not session.system_prompt:
+                        # Solo bloquear si el prompt preliminar aún no fue construido
+                        # por el hilo de fondo.  Si ya está disponible, pasamos directo
+                        # y evitamos el delay de 8 s en el primer turno del usuario.
                         logger.info("First prompt — waiting for context to finish loading (call=%s)…",
                                     session.call_sid)
                         try:
                             await asyncio.wait_for(
-                                asyncio.shield(session._context_future), timeout=45.0
+                                asyncio.shield(session._context_future), timeout=8.0
                             )
                         except asyncio.TimeoutError:
-                            logger.warning("Context loading timed out for call %s; proceeding",
-                                           session.call_sid)
+                            logger.warning(
+                                "Context loading timed out (8 s) for call %s — building fallback prompt",
+                                session.call_sid,
+                            )
                         except Exception as exc:
                             logger.error("Context loading failed for call %s: %s", session.call_sid, exc)
                         session._context_future = None
+                    elif session._context_future is not None and session.system_prompt:
+                        logger.info(
+                            "First prompt — preliminary prompt already ready, skipping 8 s wait (call=%s)",
+                            session.call_sid,
+                        )
                     session._context_loaded = True
 
-                    # Si el prompt quedó vacío (timeout o error en la carga), usar fallback
-                    # para que el bot siga el script en lugar de responder genéricamente.
+                    # Si el prompt completo aún no está listo (timeout o error), construir
+                    # un prompt de fallback con los datos rápidos ya disponibles en la sesión
+                    # (nombre, hospital, proyecto, script). Esto evita {call_name} literal
+                    # y da respuestas coherentes sin esperar los datasets lentos.
                     if not session.system_prompt:
-                        from app.services.prompt_service import DEFAULT_SYSTEM_PROMPT
-                        session.system_prompt = (
-                            (session.script.get("system_prompt") if session.script else None)
-                            or DEFAULT_SYSTEM_PROMPT
+                        from app.services.prompt_service import build_context_prompt
+                        session.system_prompt = build_context_prompt(
+                            session._customer_snapshot,   # nombre, hospital, proyecto reales
+                            [],                           # sin citas (no disponibles aún)
+                            session.script,               # script correcto
+                            {},                           # sin datasets Viaggio
+                            {},                           # sin Huella
                         )
                         logger.warning(
-                            "Empty system_prompt after context load — using fallback script/DEFAULT prompt (call=%s)",
+                            "Built fast-fallback prompt (customer=%s hospital=%s script=%s call=%s)",
+                            session.customer_name,
+                            (session._customer_snapshot or {}).get("hospital_name", "—"),
+                            session.script_name,
                             session.call_sid,
                         )
 
@@ -398,10 +443,16 @@ async def conversation_relay_ws(websocket: WebSocket):
                 _stripped = user_text.strip()
                 _lower = _stripped.lower()
 
-                # Si el turno anterior fue "¿Disculpa?" y el usuario aclara "nada":
-                # descartar silenciosamente y seguir sin tocar el historial ni llamar a GPT.
+                # Si el turno anterior fue "¿Disculpa?" y el usuario aclara "nada", repite
+                # un saludo ambiguo o dice algo de ≤1 carácter: descartar silenciosamente
+                # sin tocar el historial ni llamar a GPT.
+                # "hola", "alo", "aló", "buenas" se descartan aquí porque si se envían a GPT
+                # en mitad de una conversación el modelo reinicia el flujo de identidad.
+                _DISCULPA_ABSORB = {"hola", "alo", "aló", "buenas", "halo"}
                 if session._disculpa_pending and (
-                    _DISCULPA_CONTINUATION.match(_stripped) or len(_stripped) <= 2
+                    _DISCULPA_CONTINUATION.match(_stripped)
+                    or len(_stripped) <= 1
+                    or _lower in _DISCULPA_ABSORB
                 ):
                     session._disculpa_pending = False
                     logger.info(
@@ -412,9 +463,11 @@ async def conversation_relay_ws(websocket: WebSocket):
 
                 session._disculpa_pending = False  # reset para cualquier entrada real
 
-                # Entrada de ruido puro o de 1-2 caracteres → responder "¿Disculpa?"
+                # Entrada de ruido puro o de ≤1 carácter → responder "¿Disculpa?"
                 # sin agregar al historial (el contexto de la conversación no cambia).
-                if len(_stripped) <= 2 or _lower in _NOISE_SET:
+                # Las respuestas cortas pero válidas ("sí", "no", "ok", etc.) se excluyen
+                # mediante la lista _VALID_SHORT para no tratar un "sí" como ruido.
+                if (len(_stripped) <= 1 or _lower in _NOISE_SET) and _lower not in _VALID_SHORT:
                     session._disculpa_pending = True
                     logger.info(
                         "Noise/very-short input — responding with ¿Disculpa? (call=%s text=%r)",
