@@ -22,6 +22,8 @@ _CALL_SETTINGS_CACHE_TTL_SECONDS = 120.0
 _call_settings_cache: dict[str, Any] | None = None
 _call_settings_cache_source = "uninitialized"
 _call_settings_cache_loaded_at = 0.0
+_SCRIPT_CACHE_TTL_SECONDS = 120.0
+_script_cache: dict[str, tuple[float, dict]] = {}  # key → (loaded_at, script)
 _DATASET_CACHE_TTL_SECONDS = 60.0
 _dataset_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _HUELLA_CACHE_TTL_SECONDS = 120.0
@@ -644,6 +646,15 @@ def list_backend_appointments(patient: dict | None, fallback_customer_id: int | 
 def get_active_call_script(script_name: str | None = None) -> dict:
     settings = _settings()
     normalized_name = (script_name or "").strip()
+    cache_key = normalized_name or "default"
+
+    # Servir desde caché si está vigente (evita queries lentas en el webhook)
+    now = time.monotonic()
+    cached = _script_cache.get(cache_key)
+    if cached and (now - cached[0]) < _SCRIPT_CACHE_TTL_SECONDS:
+        logger.info("Loaded active call script from cache: %s", cache_key)
+        return dict(cached[1])
+
     if is_lovable_enabled():
         query_options = []
         if normalized_name and normalized_name != "default":
@@ -658,6 +669,7 @@ def get_active_call_script(script_name: str | None = None) -> dict:
                     script.setdefault("project_name", project_settings.get("project_name"))
                     script.setdefault("project_context", project_settings.get("project_context"))
                     script.setdefault("knowledge_base_file", project_settings.get("knowledge_base_file"))
+                _script_cache[cache_key] = (now, script)
                 logger.info(
                     "Loaded active call script from Supabase lovable.%s: %s",
                     settings.lovable_call_scripts_table,
@@ -671,6 +683,7 @@ def get_active_call_script(script_name: str | None = None) -> dict:
                 return script
 
     script = CallScriptRepository().get_active_script(normalized_name or "default") or CALL_SCRIPT
+    _script_cache[cache_key] = (now, script)
     logger.info(
         "Loaded active call script from local fallback: %s",
         {
