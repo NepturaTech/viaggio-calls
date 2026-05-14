@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     )
     ffmpeg_path: str = ""
 
+    # WhatsApp report
+    whatsapp_report_api_key: str = ""
+    whatsapp_report_url: str = "https://xibrxuqiybcalkrtycpi.supabase.co/functions/v1/send-whatsapp-report"
+
     # Audio storage
     audio_storage_enabled: bool = False
     audio_storage_url: str = ""

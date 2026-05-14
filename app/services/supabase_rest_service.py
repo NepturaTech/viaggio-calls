@@ -266,13 +266,19 @@ def _summarize_evalml(document_number: str) -> dict[str, Any]:
     records = _matching_dataset_records(settings.external_viaggio_evalml_dataset_url, document_number)
     if not records:
         return {}
-    data = _dataset_data(records[0])
+    record = records[0]
+    data = _dataset_data(record)
+    # prediction_id: UUID del registro evalml, necesario para enviar el reporte por WhatsApp
+    prediction_id = str(
+        data.get("prediction_id") or data.get("id") or record.get("id") or ""
+    )
     return {
+        "prediction_id": prediction_id,
         "mg_estimada": data.get("mg"),
         "bpm_estimado": data.get("bpm"),
         "spo2_estimada": data.get("spo2"),
         "confidence": data.get("confidence"),
-        "captured_at": data.get("created_at") or records[0].get("created_at"),
+        "captured_at": data.get("created_at") or record.get("created_at"),
         "advisory": (
             "Estos datos provienen de estimaciones de la aplicacion y no sustituyen una medicion clinica. "
             "Si el valor parece alto o preocupante, sugiere consultar a un profesional de salud."

@@ -401,7 +401,7 @@ def build_context_prompt(
         "- Si el usuario pregunta por la visita domiciliaria, visita de campo, quien fue a la casa, cuando fue la visita, que se hizo en la visita o seguimiento del equipo en terreno, usa la fuente conceptual de Huella.\n"
         "- Dentro de Huella, apoyate conceptualmente en interviewees para datos del entrevistado, sessions para sesiones o visitas registradas, y visitors para informacion del visitador o profesional de campo.\n"
         "- Si el usuario pregunta por detalles de una visita pero el dato exacto no esta cargado en el contexto actual, dilo con honestidad: 'no tengo ese dato disponible en este momento, pero puede consultarlo directamente con el equipo del proyecto'.\n"
-        "- Si el usuario pregunta por DELFOS, Viaggio, Biomarcadores o por el aplicativo movil, responde con base en la guia del proyecto incluida en el sistema.\n"
+        "- Si el usuario pregunta por DELFOS, Viaggio, BioMon o por el aplicativo movil, responde con base en la guia del proyecto incluida en el sistema.\n"
         "- Usa estas fuentes solo cuando el usuario lo pida o cuando sea realmente necesario para responder.\n"
         "- Si en el contexto actual no tienes el dato concreto cargado, dilo con honestidad y no inventes valores.\n"
         "- Cuando el usuario pregunte por un dato puntual de la plataforma, como IMC, pasos, pulso, saturacion, alimentacion o una medicion reciente, puedes responder primero con una frase natural como: 'voy a revisar en la plataforma' o 'ya consulto tu informacion en la base de datos', y enseguida dar la respuesta usando solo el contexto disponible.\n"
@@ -412,6 +412,29 @@ def build_context_prompt(
         "- Si hablas de mg, bpm, spo2 o confidence, aclara que son estimaciones de la aplicacion y no un diagnostico confirmado.\n"
         "- Si una estimacion parece preocupante, sugiere consultar a un profesional de salud sin alarmar al usuario ni presentar la app como diagnostico definitivo.\n"
     )
+
+    # ── Reporte WhatsApp ─────────────────────────────────────────────────────
+    _has_evalml = bool((dataset_context or {}).get("evalml"))
+    if _has_evalml:
+        context += (
+            "\n## Envío de reporte por WhatsApp\n"
+            "- Si el usuario pregunta por su reporte, sus resultados o quiere ver sus datos del sistema, "
+            "responde: 'Claro, te voy a enviar tu reporte por WhatsApp ahora mismo con tus datos del sistema.'\n"
+            "- El sistema enviará el reporte automáticamente al número del paciente.\n"
+            "- La app móvil del proyecto se llama BioMon (antes Biomarcadores). "
+            "El chat de WhatsApp del proyecto se llama Viaggio. Son herramientas distintas.\n"
+            "- No menciones detalles técnicos del envío. Solo confirma que el reporte ya fue enviado.\n"
+        )
+    else:
+        context += (
+            "\n## Reporte por WhatsApp\n"
+            "- Si el usuario pregunta por su reporte o sus resultados, responde: "
+            "'Para recibir un reporte debes tener registros en el sistema. "
+            "Puedes generarlos interactuando con el chat de Viaggio por WhatsApp "
+            "o usando la app BioMon en tu celular.'\n"
+            "- No prometas enviar un reporte si no hay datos disponibles.\n"
+            "- La app móvil se llama BioMon (antes Biomarcadores). El chat de WhatsApp se llama Viaggio.\n"
+        )
 
     # ── Contexto temporal (fecha actual + días disponibles) ─────────────────
     context += _build_temporal_context()

@@ -20,6 +20,7 @@ from app.services.openai_service import (
     generate_response,
     moderate_user_input,
 )
+from app.services.report_service import send_whatsapp_report
 from app.services.prompt_service import build_context_prompt
 from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
@@ -61,6 +62,9 @@ class ConversationSession:
         # Noise / short input handling: when True the previous bot turn was "¿Disculpa?"
         # and we are waiting for the user to either clarify or confirm "nada".
         self._disculpa_pending: bool = False
+        # Reporte WhatsApp: se llena cuando el contexto completo carga
+        self.prediction_id: str | None = None
+        self.has_evalml_data: bool = False
 
     def add_user_message(self, text: str):
         self.conversation_history.append({"role": "user", "content": text})
@@ -68,6 +72,14 @@ class ConversationSession:
     def add_assistant_message(self, text: str):
         self.conversation_history.append({"role": "assistant", "content": text})
 
+
+REPORT_REQUEST_PATTERN = re.compile(
+    r"\b(reporte|informe)\b"
+    r"|\b(mis\s+resultado|ver\s+mis\s+dato|dame\s+(el|mi|un)\s+reporte"
+    r"|quiero\s+(mi|el|un)\s+reporte|env[ií]a?me\s+(el|mi|un)\s+reporte"
+    r"|manda\s+(el|mi|un)\s+reporte|quiero\s+ver\s+mis\s+dato)\b",
+    re.IGNORECASE,
+)
 
 FAREWELL_PATTERN = re.compile(
     r"\b(adios|hasta luego|hasta pronto|chao|chau|bye|buen dia|buenas tardes|buenas noches|gracias igualmente|igualmente)\b",
@@ -265,6 +277,11 @@ def _load_session_context(session: ConversationSession):
         len(huella_context.get("sessions") or []),
         len(huella_context.get("visitors") or []),
     )
+
+    # ── prediction_id para reporte WhatsApp ─────────────────────────────────
+    evalml = dataset_context.get("evalml") or {}
+    session.prediction_id = evalml.get("prediction_id") or None
+    session.has_evalml_data = bool(session.prediction_id)
 
     # ── Prompt final ────────────────────────────────────────────────────────
     session.system_prompt = build_context_prompt(
@@ -503,11 +520,22 @@ async def conversation_relay_ws(websocket: WebSocket):
                         ai_response = MODERATION_REDIRECT_RESPONSE
                 else:
                     session.pending_hangup = _should_end_call(user_text)
+                    _report_requested = bool(REPORT_REQUEST_PATTERN.search(user_text))
                     ai_response = await generate_response(
                         session.system_prompt,
                         session.conversation_history[:-1],
                         user_text,
                     )
+                    # Enviar reporte WhatsApp si el usuario lo solicitó y hay datos
+                    if _report_requested and session.has_evalml_data and session.prediction_id:
+                        asyncio.create_task(send_whatsapp_report(
+                            session.prediction_id,
+                            session.customer_phone or "",
+                        ))
+                        logger.info(
+                            "WhatsApp report disparado: prediction_id=%s phone=%s call=%s",
+                            session.prediction_id, session.customer_phone, session.call_sid,
+                        )
                 # ────────────────────────────────────────────────────────────
 
                 session.add_assistant_message(ai_response)
