@@ -62,9 +62,6 @@ class ConversationSession:
         # Noise / short input handling: when True the previous bot turn was "¿Disculpa?"
         # and we are waiting for the user to either clarify or confirm "nada".
         self._disculpa_pending: bool = False
-        # Reporte WhatsApp: se llena cuando el contexto completo carga
-        self.prediction_id: str | None = None
-        self.has_evalml_data: bool = False
 
     def add_user_message(self, text: str):
         self.conversation_history.append({"role": "user", "content": text})
@@ -277,11 +274,6 @@ def _load_session_context(session: ConversationSession):
         len(huella_context.get("sessions") or []),
         len(huella_context.get("visitors") or []),
     )
-
-    # ── prediction_id para reporte WhatsApp ─────────────────────────────────
-    evalml = dataset_context.get("evalml") or {}
-    session.prediction_id = evalml.get("prediction_id") or None
-    session.has_evalml_data = bool(session.prediction_id)
 
     # ── Prompt final ────────────────────────────────────────────────────────
     session.system_prompt = build_context_prompt(
@@ -526,15 +518,15 @@ async def conversation_relay_ws(websocket: WebSocket):
                         session.conversation_history[:-1],
                         user_text,
                     )
-                    # Enviar reporte WhatsApp si el usuario lo solicitó y hay datos
-                    if _report_requested and session.has_evalml_data and session.prediction_id:
+                    # Enviar reporte WhatsApp si el usuario lo solicitó y hay documento
+                    if _report_requested and session.patient_id:
                         asyncio.create_task(send_whatsapp_report(
-                            session.prediction_id,
+                            session.patient_id,
                             session.customer_phone or "",
                         ))
                         logger.info(
-                            "WhatsApp report disparado: prediction_id=%s phone=%s call=%s",
-                            session.prediction_id, session.customer_phone, session.call_sid,
+                            "WhatsApp report disparado: doc=%s phone=%s call=%s",
+                            session.patient_id, session.customer_phone, session.call_sid,
                         )
                 # ────────────────────────────────────────────────────────────
 

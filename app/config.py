@@ -97,7 +97,7 @@ class Settings(BaseSettings):
 
     # WhatsApp report
     whatsapp_report_api_key: str = ""
-    whatsapp_report_url: str = "https://xibrxuqiybcalkrtycpi.supabase.co/functions/v1/send-whatsapp-report"
+    whatsapp_report_url: str = "https://xibrxuqiybcalkrtycpi.supabase.co/functions/v1/send-report-by-document"
 
     # Audio storage
     audio_storage_enabled: bool = False
