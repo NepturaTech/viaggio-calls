@@ -80,7 +80,18 @@ def _headers(source: str) -> dict[str, str]:
     }
 
 
-def _request_rows(source: str, table: str, params: dict[str, str] | None = None) -> list[dict]:
+# Sentinel returned by _request_rows when the column used as filter doesn't exist (HTTP 400).
+# Callers that probe multiple field names can check `is _COLUMN_NOT_FOUND` to skip silently.
+_COLUMN_NOT_FOUND: list = []
+
+
+def _request_rows(
+    source: str,
+    table: str,
+    params: dict[str, str] | None = None,
+    *,
+    silent_400: bool = False,
+) -> list[dict]:
     config = _source_config(source)
     if not config["url"] or not config["key"]:
         return []
@@ -89,9 +100,35 @@ def _request_rows(source: str, table: str, params: dict[str, str] | None = None)
     try:
         with httpx.Client(timeout=5.0) as client:
             response = client.get(endpoint, headers=_headers(source), params=params or {})
+            if silent_400 and response.status_code == 400:
+                # Column doesn't exist in this table — expected when probing field names.
+                logger.debug(
+                    "Supabase %s: column not found in %s (400), skipping field probe",
+                    source,
+                    table,
+                )
+                return _COLUMN_NOT_FOUND  # type: ignore[return-value]
             response.raise_for_status()
         data = response.json()
         return data if isinstance(data, list) else []
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 404:
+            # Table doesn't exist in this Supabase project — not a runtime error.
+            logger.debug(
+                "Supabase %s: table '%s' not found (404) — skipping",
+                source,
+                table,
+            )
+        else:
+            logger.warning(
+                "Supabase %s request failed for table %s (%d): %s",
+                source,
+                table,
+                status,
+                exc.response.text[:200],
+            )
+        return []
     except Exception as exc:
         logger.warning("Supabase %s request failed for table %s: %s", source, table, exc)
         return []
@@ -469,7 +506,10 @@ def _find_lovable_patient_by_document(document_number: str) -> dict | None:
                 field: f"eq.{document_number}",
                 "limit": "1",
             },
+            silent_400=True,
         )
+        if rows is _COLUMN_NOT_FOUND:
+            continue  # this column doesn't exist in the table — try next
         if rows:
             logger.info(
                 "Hospital enrichment found in Lovable call_patients (field=%s doc=%s): %s",

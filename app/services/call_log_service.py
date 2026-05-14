@@ -67,7 +67,7 @@ def _post_log_row(row: dict, dropped: list[str] | None = None) -> bool:
             if resp.status_code == 400:
                 missing = _extract_missing_column(resp.text)
                 if missing and missing not in dropped:
-                    logger.warning("call_logs: retrying without unknown column '%s'", missing)
+                    logger.info("call_logs: column '%s' not in table, retrying without it", missing)
                     return _post_log_row(row, dropped + [missing])
             resp.raise_for_status()
         return True
@@ -96,7 +96,7 @@ def _patch_log_row(call_sid: str, updates: dict, dropped: list[str] | None = Non
             if resp.status_code == 400:
                 missing = _extract_missing_column(resp.text)
                 if missing and missing not in dropped:
-                    logger.warning("call_logs PATCH: retrying without unknown column '%s'", missing)
+                    logger.info("call_logs PATCH: column '%s' not in table, retrying without it", missing)
                     return _patch_log_row(call_sid, updates, dropped + [missing])
                 logger.warning("call_logs PATCH 400 (sid=%s): %s", call_sid, resp.text[:300])
             resp.raise_for_status()

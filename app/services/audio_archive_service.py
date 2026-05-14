@@ -878,8 +878,8 @@ def _upload_recording_to_supabase(
                     dropped_columns.append(missing)
                     rows_to_send = [{k: v for k, v in row.items() if k not in dropped_columns}
                                     for row in rows_to_send]
-                    logger.warning(
-                        "Retrying call_artifacts (Twilio rec) without column '%s' (call=%s)",
+                    logger.info(
+                        "call_artifacts: column '%s' not in table, retrying without it (call=%s)",
                         missing, call_sid,
                     )
                     continue
@@ -888,8 +888,8 @@ def _upload_recording_to_supabase(
                 if invalid_col and invalid_col not in nulled_columns and invalid_col not in dropped_columns:
                     nulled_columns.append(invalid_col)
                     rows_to_send = CallAudioArchive._drop_column_from_rows(rows_to_send, invalid_col)
-                    logger.warning(
-                        "Retrying call_artifacts (Twilio rec) nulling column '%s' (UUID/type mismatch, call=%s)",
+                    logger.info(
+                        "call_artifacts: column '%s' type mismatch (not UUID), nulling and retrying (call=%s)",
                         invalid_col, call_sid,
                     )
                     continue
