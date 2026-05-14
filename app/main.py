@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -23,12 +25,48 @@ from app.routes.ws_conversationrelay import router as ws_router
 from app.services.error_log_service import log_error_event
 from app.utils.logging import setup_logging
 
+logger = logging.getLogger(__name__)
+
+# Intervalo de refresco de caché (90 s — bien por debajo de los TTL de 60-120 s
+# para que nunca haya un miss en llamadas reales).
+_CACHE_REFRESH_INTERVAL_SECONDS = 90
+
+
+async def _cache_refresh_loop() -> None:
+    """Background task: pre-carga cachés al inicio y los refresca cada 90 s."""
+    from app.services.supabase_rest_service import warm_all_caches
+
+    loop = asyncio.get_event_loop()
+
+    # Pre-carga inmediata al arrancar
+    logger.info("Cache warmup inicial arrancando...")
+    try:
+        await loop.run_in_executor(None, warm_all_caches)
+    except Exception as exc:
+        logger.warning("Cache warmup inicial falló (no crítico): %s", exc)
+
+    # Refresco periódico
+    while True:
+        await asyncio.sleep(_CACHE_REFRESH_INTERVAL_SECONDS)
+        try:
+            await loop.run_in_executor(None, warm_all_caches)
+        except Exception as exc:
+            logger.warning("Cache refresh periódico falló (no crítico): %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     await init_db()
+    # Lanzar refresco de caché en background (no bloquea el arranque)
+    refresh_task = asyncio.create_task(_cache_refresh_loop())
     yield
+    # Cancelar el task limpiamente al apagar
+    refresh_task.cancel()
+    try:
+        await refresh_task
+    except asyncio.CancelledError:
+        pass
 
 
 settings = get_settings()

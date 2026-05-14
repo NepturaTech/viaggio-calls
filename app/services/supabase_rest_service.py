@@ -980,3 +980,82 @@ def get_backend_contract() -> dict[str, Any]:
             ],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Cache warmup — pre-carga y refresco periódico
+# ---------------------------------------------------------------------------
+
+#: Estado del último warmup (leído por el endpoint /health)
+_warmup_status: dict[str, Any] = {}
+_warmup_last_at: float = 0.0
+
+
+def warm_all_caches() -> dict[str, Any]:
+    """Pre-cargar todos los cachés de Supabase en memoria.
+
+    Seguro llamarlo en startup y periódicamente desde un background task.
+    Retorna un dict con el resultado de cada fuente para exponer en /health.
+    """
+    global _warmup_status, _warmup_last_at
+
+    settings = _settings()
+    results: dict[str, Any] = {}
+
+    # 1. Call settings (proyecto / configuración global)
+    try:
+        cfg = get_call_settings()
+        results["call_settings"] = "ok" if cfg else "empty"
+    except Exception as exc:
+        results["call_settings"] = f"error: {exc}"
+
+    # 2. Scripts activos — cargamos el default y todos los registrados en el cache
+    try:
+        script = get_active_call_script(None)
+        name = (script.get("name") or "default") if script else "—"
+        results["script"] = f"ok ({name})"
+    except Exception as exc:
+        results["script"] = f"error: {exc}"
+
+    # 3. Dataset de pacientes Viaggio
+    if settings.external_viaggio_pacientes_dataset_url:
+        try:
+            rows = _request_dataset_records(settings.external_viaggio_pacientes_dataset_url)
+            results["viaggio_patients"] = f"ok ({len(rows)} pacientes)"
+        except Exception as exc:
+            results["viaggio_patients"] = f"error: {exc}"
+    else:
+        results["viaggio_patients"] = "disabled"
+
+    # 4. Dataset evalml Viaggio (predicciones ML)
+    if settings.external_viaggio_evalml_dataset_url:
+        try:
+            rows = _request_dataset_records(settings.external_viaggio_evalml_dataset_url)
+            results["viaggio_evalml"] = f"ok ({len(rows)} rows)"
+        except Exception as exc:
+            results["viaggio_evalml"] = f"error: {exc}"
+    else:
+        results["viaggio_evalml"] = "disabled"
+
+    # 5. Huella interviewees
+    if is_huella_enabled():
+        try:
+            rows = _request_huella_rows_cached(settings.huella_interviewees_table)
+            results["huella_interviewees"] = f"ok ({len(rows)} rows)"
+        except Exception as exc:
+            results["huella_interviewees"] = f"error: {exc}"
+    else:
+        results["huella_interviewees"] = "disabled"
+
+    _warmup_status = results
+    _warmup_last_at = time.monotonic()
+    logger.info("Cache warmup completado: %s", results)
+    return results
+
+
+def get_warmup_status() -> dict[str, Any]:
+    """Retorna el último estado de warmup (para exponer en /health)."""
+    return {
+        "last_warmup_ago_seconds": round(time.monotonic() - _warmup_last_at, 1) if _warmup_last_at else None,
+        "sources": _warmup_status,
+    }
