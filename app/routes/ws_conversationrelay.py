@@ -187,7 +187,13 @@ def _load_session_context(session: ConversationSession):
             )
 
     session.customer_name = customer["full_name"] if customer else None
-    session.patient_id = str(customer.get("document_number") or "") if customer else None
+    # patient_id: preferir document_number, caer en identificacion como fallback.
+    # Guardamos None (no string vacío) para que la comprobación `if session.patient_id` sea segura.
+    _doc = (
+        str(customer.get("document_number") or customer.get("identificacion") or "").strip()
+        if customer else ""
+    )
+    session.patient_id = _doc or None
     # Guardar snapshot inmediatamente — los fetches lentos (Viaggio/Huella) vienen después.
     # El fallback de prompt lo usa si el contexto completo no llega a tiempo.
     session._customer_snapshot = customer if customer else None
