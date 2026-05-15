@@ -47,7 +47,7 @@ async def generate_response(
             model=settings.anthropic_model,
             system=system_prompt,
             messages=messages,
-            max_tokens=300,
+            max_tokens=180,  # Respuestas cortas — llamada telefónica, máx 2-3 frases
             temperature=0.7,
         )
         assistant_message = response.content[0].text
