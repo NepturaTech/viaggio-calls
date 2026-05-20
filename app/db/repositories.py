@@ -47,12 +47,14 @@ def register_call_patient(
     patient_name: str | None,
     patient_id: str | None,
     script_name: str | None = None,
+    patient_phone: str | None = None,
 ) -> None:
     """Registra datos del paciente asociados a un call_sid."""
     _call_patient_registry[call_sid] = {
         "patient_name": patient_name or "",
         "patient_id": patient_id or "",
         "script_name": script_name or "default",
+        "patient_phone": patient_phone or "",
     }
 
 

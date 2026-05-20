@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     whatsapp_report_api_key: str = ""
     whatsapp_report_url: str = "https://xibrxuqiybcalkrtycpi.supabase.co/functions/v1/send-report-by-document"
 
+    # ManyChat — automatización cuando no se contesta la llamada
+    manychat_api_key: str = ""
+    manychat_no_answer_flow_ns: str = ""   # Flow NS del flow a disparar
+
     # Audio storage
     audio_storage_enabled: bool = False
     audio_storage_url: str = ""
