@@ -26,6 +26,9 @@ _SCRIPT_CACHE_TTL_SECONDS = 120.0
 _script_cache: dict[str, tuple[float, dict]] = {}  # key → (loaded_at, script)
 _DATASET_CACHE_TTL_SECONDS = 60.0
 _dataset_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# Cache para manychat_user_id leído directamente de la tabla Viaggio (no del dataset)
+_VIAGGIO_MANYCHAT_LOOKUP_TTL = 120.0
+_viaggio_manychat_lookup_cache: tuple[float, dict[str, str]] | None = None
 _HUELLA_CACHE_TTL_SECONDS = 120.0
 _huella_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
@@ -208,6 +211,58 @@ def _as_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _get_viaggio_manychat_lookup() -> dict[str, str]:
+    """Carga {normalized_phone: manychat_user_id} desde la tabla Viaggio directa.
+
+    La tabla pacientes tiene la columna real `manychat_user_id` (ej. 394326569).
+    El dataset API devuelve ese campo con el número de teléfono (valor incorrecto),
+    por eso se consulta la tabla directamente.
+
+    Resultado cacheado _VIAGGIO_MANYCHAT_LOOKUP_TTL segundos.
+    """
+    global _viaggio_manychat_lookup_cache
+    now = time.monotonic()
+    if (
+        _viaggio_manychat_lookup_cache is not None
+        and (now - _viaggio_manychat_lookup_cache[0]) < _VIAGGIO_MANYCHAT_LOOKUP_TTL
+    ):
+        return _viaggio_manychat_lookup_cache[1]
+
+    settings = _settings()
+    table = getattr(settings, "external_viaggio_pacientes_table", "pacientes") or "pacientes"
+
+    if not is_external_viaggio_enabled() or not table:
+        return {}
+
+    try:
+        rows = _request_rows(
+            "viaggio",
+            table,
+            {"select": "numero,manychat_user_id", "limit": "5000"},
+            silent_400=True,
+        )
+        if rows is _COLUMN_NOT_FOUND:
+            logger.debug("Viaggio pacientes: columna manychat_user_id no encontrada")
+            _viaggio_manychat_lookup_cache = (now, {})
+            return {}
+
+        lookup: dict[str, str] = {}
+        for row in rows:
+            phone = normalize_phone(_as_text(row.get("numero") or ""))
+            mc_id = _as_text(row.get("manychat_user_id") or "")
+            # Descartar entradas donde manychat_user_id sea el propio teléfono
+            if phone and mc_id and mc_id not in (phone, phone.lstrip("+")):
+                lookup[phone] = mc_id
+        _viaggio_manychat_lookup_cache = (now, lookup)
+        logger.info("Viaggio manychat_user_id lookup cargado: %d entradas", len(lookup))
+        return lookup
+    except Exception as exc:
+        logger.warning("Viaggio manychat lookup falló: %s", exc)
+        if _viaggio_manychat_lookup_cache is not None:
+            return _viaggio_manychat_lookup_cache[1]
+        return {}
+
+
 def _normalize_dataset_patient(record: dict[str, Any]) -> dict[str, Any]:
     data = _dataset_data(record)
     return {
@@ -224,13 +279,10 @@ def _normalize_dataset_patient(record: dict[str, Any]) -> dict[str, Any]:
         "findrisc": data.get("puntaje_findrisc"),
         "objective": data.get("objetivo"),
         "activity_level": data.get("actividad_fisica"),
-        # ManyChat subscriber ID — usado para enviar flows sin pasar por findByPhone
-        "manychat_user_id": _as_text(
-            data.get("manychat_user_id")
-            or data.get("manychat_id")
-            or data.get("subscriber_id")
-            or ""
-        ),
+        # manychat_user_id NO se extrae del dataset porque el campo del dataset
+        # contiene el teléfono en lugar del subscriber_id real.
+        # Se inyecta desde _get_viaggio_manychat_lookup() después de normalizar.
+        "manychat_user_id": "",
         "source": "viaggio_dataset",
         "_dataset_raw": data,
     }
@@ -595,7 +647,15 @@ def list_backend_patients() -> list[dict]:
     # Fuente principal: dataset de Viaggio (tablas directas eliminadas)
     if settings.external_viaggio_pacientes_dataset_url:
         rows = _request_dataset_records(settings.external_viaggio_pacientes_dataset_url)
-        return [_enrich_patient(_normalize_dataset_patient(row)) for row in rows]
+        mc_lookup = _get_viaggio_manychat_lookup()
+        patients = []
+        for row in rows:
+            p = _normalize_dataset_patient(row)
+            phone = p.get("phone_number", "")
+            if phone and not p.get("manychat_user_id"):
+                p["manychat_user_id"] = mc_lookup.get(phone, "")
+            patients.append(_enrich_patient(p))
+        return patients
     if is_lovable_enabled():
         rows = _request_rows(
             "lovable",
@@ -619,13 +679,18 @@ def find_backend_patient_by_phone(phone_number: str) -> dict | None:
     )
 
     if settings.external_viaggio_pacientes_dataset_url:
+        mc_lookup = _get_viaggio_manychat_lookup()
         for record in _request_dataset_records(settings.external_viaggio_pacientes_dataset_url):
             patient = _normalize_dataset_patient(record)
             patient_phone = patient.get("phone_number")
             if patient_phone and any(patient_phone == normalize_phone(candidate) for candidate in candidates):
+                # Inyectar manychat_user_id real desde la tabla directa (el dataset tiene el teléfono)
+                if patient_phone and not patient.get("manychat_user_id"):
+                    patient["manychat_user_id"] = mc_lookup.get(patient_phone, "")
                 logger.info(
-                    "Patient found in Viaggio pacientes dataset: %s",
+                    "Patient found in Viaggio pacientes dataset: %s (manychat_user_id=%s)",
                     _preview_row(patient),
+                    patient.get("manychat_user_id") or "—",
                 )
                 return _enrich_patient(patient)
         logger.info(
@@ -1033,6 +1098,16 @@ def warm_all_caches() -> dict[str, Any]:
             results["viaggio_patients"] = f"error: {exc}"
     else:
         results["viaggio_patients"] = "disabled"
+
+    # 3b. Lookup de manychat_user_id desde tabla Viaggio directa
+    if is_external_viaggio_enabled():
+        try:
+            mc_lookup = _get_viaggio_manychat_lookup()
+            results["viaggio_manychat_lookup"] = f"ok ({len(mc_lookup)} entradas)"
+        except Exception as exc:
+            results["viaggio_manychat_lookup"] = f"error: {exc}"
+    else:
+        results["viaggio_manychat_lookup"] = "disabled"
 
     # 4. Dataset evalml Viaggio (predicciones ML)
     if settings.external_viaggio_evalml_dataset_url:

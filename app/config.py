@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     external_viaggio_anon_key: str = ""
     external_viaggio_service_role_key: str = ""
     external_viaggio_dataset_api_key: str = ""
+    external_viaggio_pacientes_table: str = "pacientes"  # tabla directa para manychat_user_id
     external_viaggio_pacientes_dataset_url: str = ""
     external_viaggio_food_entries_dataset_url: str = ""
     external_viaggio_conversaciones_dataset_url: str = ""
