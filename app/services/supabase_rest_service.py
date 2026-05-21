@@ -211,12 +211,19 @@ def _as_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _phone_digits(phone: str) -> str:
+    """Extrae solo los dígitos de un teléfono."""
+    return "".join(ch for ch in phone if ch.isdigit())
+
+
 def _get_viaggio_manychat_lookup() -> dict[str, str]:
-    """Carga {normalized_phone: manychat_user_id} desde la tabla Viaggio directa.
+    """Carga {forma_de_telefono: manychat_user_id} desde la tabla Viaggio directa.
 
     La tabla pacientes tiene la columna real `manychat_user_id` (ej. 394326569).
-    El dataset API devuelve ese campo con el número de teléfono (valor incorrecto),
-    por eso se consulta la tabla directamente.
+    El dataset API devuelve ese campo con el número de teléfono (valor incorrecto).
+
+    El lookup almacena MÚLTIPLES formas de cada número (con +57, sin +, solo 10 dígitos)
+    para tolerar diferencias de formato entre la tabla y el dataset.
 
     Resultado cacheado _VIAGGIO_MANYCHAT_LOOKUP_TTL segundos.
     """
@@ -248,19 +255,72 @@ def _get_viaggio_manychat_lookup() -> dict[str, str]:
 
         lookup: dict[str, str] = {}
         for row in rows:
-            phone = normalize_phone(_as_text(row.get("numero") or ""))
+            raw_numero = _as_text(row.get("numero") or "")
             mc_id = _as_text(row.get("manychat_user_id") or "")
+            if not raw_numero or not mc_id:
+                continue
+
+            digits = _phone_digits(raw_numero)
+            if not digits:
+                continue
+
             # Descartar entradas donde manychat_user_id sea el propio teléfono
-            if phone and mc_id and mc_id not in (phone, phone.lstrip("+")):
-                lookup[phone] = mc_id
+            if mc_id == digits or mc_id == f"+{digits}":
+                continue
+
+            # Guardar todas las variantes del número para tolerar diferencias de formato:
+            # tabla puede tener "573209085770" y dataset puede tener "+3209085770"
+            for key in _build_phone_variants(digits):
+                if key and key not in lookup:
+                    lookup[key] = mc_id
+
         _viaggio_manychat_lookup_cache = (now, lookup)
-        logger.info("Viaggio manychat_user_id lookup cargado: %d entradas", len(lookup))
+        logger.info(
+            "Viaggio manychat_user_id lookup cargado: %d entradas (%d pacientes)",
+            len(lookup),
+            len(rows),
+        )
         return lookup
     except Exception as exc:
         logger.warning("Viaggio manychat lookup falló: %s", exc)
         if _viaggio_manychat_lookup_cache is not None:
             return _viaggio_manychat_lookup_cache[1]
         return {}
+
+
+def _build_phone_variants(digits: str) -> list[str]:
+    """Genera todas las variantes de un número dado sus dígitos puros.
+
+    Ej. '573209085770' → ['+573209085770', '573209085770', '+3209085770', '3209085770']
+    Ej. '3209085770'   → ['+573209085770', '573209085770', '+3209085770', '3209085770']
+    """
+    variants: list[str] = []
+    # Asegurar dígitos con código de país Colombia (57)
+    if digits.startswith("57") and len(digits) >= 12:
+        full = digits          # 573209085770
+        short = digits[2:]     # 3209085770
+    else:
+        short = digits
+        full = f"57{digits}"
+
+    for v in [f"+{full}", full, f"+{short}", short]:
+        if v and v not in variants:
+            variants.append(v)
+    return variants
+
+
+def _lookup_manychat_id(mc_lookup: dict[str, str], phone: str) -> str:
+    """Busca manychat_user_id usando todas las variantes del número de teléfono."""
+    if not phone:
+        return ""
+    digits = _phone_digits(phone)
+    if not digits:
+        return ""
+    for variant in _build_phone_variants(digits):
+        mc_id = mc_lookup.get(variant, "")
+        if mc_id:
+            return mc_id
+    return ""
 
 
 def _normalize_dataset_patient(record: dict[str, Any]) -> dict[str, Any]:
@@ -653,7 +713,7 @@ def list_backend_patients() -> list[dict]:
             p = _normalize_dataset_patient(row)
             phone = p.get("phone_number", "")
             if phone and not p.get("manychat_user_id"):
-                p["manychat_user_id"] = mc_lookup.get(phone, "")
+                p["manychat_user_id"] = _lookup_manychat_id(mc_lookup, phone)
             patients.append(_enrich_patient(p))
         return patients
     if is_lovable_enabled():
@@ -686,7 +746,7 @@ def find_backend_patient_by_phone(phone_number: str) -> dict | None:
             if patient_phone and any(patient_phone == normalize_phone(candidate) for candidate in candidates):
                 # Inyectar manychat_user_id real desde la tabla directa (el dataset tiene el teléfono)
                 if patient_phone and not patient.get("manychat_user_id"):
-                    patient["manychat_user_id"] = mc_lookup.get(patient_phone, "")
+                    patient["manychat_user_id"] = _lookup_manychat_id(mc_lookup, patient_phone)
                 logger.info(
                     "Patient found in Viaggio pacientes dataset: %s (manychat_user_id=%s)",
                     _preview_row(patient),
