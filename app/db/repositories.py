@@ -63,6 +63,22 @@ def get_call_patient(call_sid: str) -> dict | None:
     return _call_patient_registry.get(call_sid)
 
 
+def mark_human_turn(call_sid: str) -> None:
+    """Marca que el humano ya habló en esta llamada (primer turno real del usuario).
+
+    Usado por el AMD handler para distinguir buzón de voz de llamada humana real.
+    """
+    entry = _call_patient_registry.get(call_sid)
+    if entry is not None:
+        entry["human_spoke"] = True
+
+
+def human_has_spoken(call_sid: str) -> bool:
+    """Retorna True si el humano ya tuvo al menos un turno de voz en esta llamada."""
+    entry = _call_patient_registry.get(call_sid)
+    return bool(entry and entry.get("human_spoke"))
+
+
 class CustomerRepository:
     def find_by_phone(self, phone_number: str) -> dict | None:
         normalized = phone_number.strip().replace(" ", "")

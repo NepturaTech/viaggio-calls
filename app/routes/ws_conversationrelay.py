@@ -6,7 +6,7 @@ import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.db.repositories import CallRepository, pop_pending_call_params
+from app.db.repositories import CallRepository, pop_pending_call_params, mark_human_turn
 from app.services.call_log_service import (
     append_transcript_line,
     finalize_call,
@@ -368,6 +368,11 @@ async def conversation_relay_ws(websocket: WebSocket):
 
                 turn = len(session.conversation_history) // 2 + 1
                 logger.info("=== TURNO %d — USUARIO ===\n  %s", turn, user_text)
+
+                # Marcar que el humano ya habló (para que AMD no cuelgue por voicemail
+                # si llega tarde un resultado de machine_start/machine_end_silence)
+                if session.call_sid:
+                    mark_human_turn(session.call_sid)
 
                 # ── Detección de buzón de voz — PRIMERO, antes de cualquier await ──
                 # Se chequea ANTES de esperar el contexto para colgar de inmediato

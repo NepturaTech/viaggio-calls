@@ -10,7 +10,7 @@ from app.services.twilio_service import (
     hangup_call,
     make_outbound_call,
 )
-from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient
+from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken
 from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
@@ -167,20 +167,30 @@ async def handle_answering_machine_detection(
         MachineDetectionDuration,
     )
 
-    # IMPORTANTE: No colgar en "machine_start".
-    # Cuando el agente IA habla primero (outbound), AMD puede detectar la voz
-    # sintetizada (ElevenLabs/OpenAI) como "machine_start" → falso positivo.
-    # Solo colgamos en señales definitivas de buzón de voz:
-    #   - machine_end_beep: se escuchó el beep del contestador → buzón seguro
-    #   - fax: señal de fax → descartar
-    # machine_start y machine_end_silence se ignoran para evitar cortar llamadas reales.
-    definitive_voicemail = {"machine_end_beep", "fax"}
+    import asyncio
+
+    # Casos definitivos de buzón de voz — colgar siempre:
+    #   machine_end_beep    → contestador con beep (buzón seguro)
+    #   machine_end_silence → contestador sin beep (mensaje grabado corto)
+    #   fax                 → señal de fax
+    #
+    # machine_start: puede ser falso positivo cuando ElevenLabs habla primero
+    # (AMD confunde la voz sintetizada con una máquina). Solo colgamos si el
+    # humano AÚN NO ha hablado — si ya interactuó, ignoramos el resultado.
+    definitive_voicemail = {"machine_end_beep", "machine_end_silence", "fax"}
+
+    # machine_start sin turno humano previo → probable buzón de voz real
+    if answered_by == "machine_start" and not human_has_spoken(CallSid):
+        logger.info(
+            "AMD machine_start sin turno humano — probable buzón. Colgando. sid=%s", CallSid
+        )
+        definitive_voicemail = definitive_voicemail | {"machine_start"}
+
     if answered_by in definitive_voicemail:
-        import asyncio
         try:
             hangup_call(CallSid)
             delete_call_archive(CallSid)
-            logger.info("Call %s completed early due to voicemail detection (%s)", CallSid, answered_by)
+            logger.info("Call %s colgada por voicemail AMD (%s)", CallSid, answered_by)
             # Disparar flow de ManyChat para buzón de voz
             registry = get_call_patient(CallSid)
             phone = (registry or {}).get("patient_phone", "")

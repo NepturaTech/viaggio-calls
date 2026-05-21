@@ -34,11 +34,14 @@ def _headers() -> dict[str, str]:
 
 
 def _find_subscriber_by_phone(phone: str) -> str | None:
-    """Busca el subscriber_id de ManyChat para un número de teléfono (formato E.164 sin +).
+    """Busca el subscriber_id de ManyChat por número de teléfono WhatsApp.
+
+    ManyChat unifica contactos de WhatsApp y Facebook bajo el mismo endpoint
+    /fb/subscriber/findByPhone — el número debe estar en formato E.164 sin '+'.
 
     Retorna el subscriber_id como string, o None si no se encuentra.
     """
-    # ManyChat espera el número sin el símbolo '+', solo dígitos
+    # ManyChat espera el número sin '+', solo dígitos (ej. 573209085770)
     normalized = phone.lstrip("+").strip()
     if not normalized:
         return None
@@ -53,14 +56,26 @@ def _find_subscriber_by_phone(phone: str) -> str | None:
             if resp.status_code == 404:
                 logger.info("ManyChat: suscriptor no encontrado para phone=%s", normalized)
                 return None
+            if resp.status_code == 401:
+                logger.error(
+                    "ManyChat: API key inválida (401) — verifica MANYCHAT_API_KEY en Settings → API"
+                )
+                return None
             resp.raise_for_status()
             data = resp.json()
+            # La respuesta tiene forma: {"status": "success", "data": {"id": 123456, ...}}
             subscriber_id = (data.get("data") or {}).get("id")
             if subscriber_id:
                 logger.info(
-                    "ManyChat: suscriptor encontrado phone=%s id=%s",
+                    "ManyChat: suscriptor encontrado phone=%s subscriber_id=%s",
                     normalized,
                     subscriber_id,
+                )
+            else:
+                logger.info(
+                    "ManyChat: respuesta OK pero sin id para phone=%s — "
+                    "verifica que el contacto esté registrado en ManyChat por WhatsApp",
+                    normalized,
                 )
             return str(subscriber_id) if subscriber_id else None
     except Exception as exc:
