@@ -89,6 +89,7 @@ async def handle_incoming_call(
         patient_id=str(customer.get("document_number") or "") if customer else None,
         script_name=script_name,
         patient_phone=customer_phone,
+        manychat_user_id=customer.get("manychat_user_id") if customer else None,
     )
     welcome = get_welcome_greeting(script, customer)
     logger.info(
@@ -144,11 +145,17 @@ async def handle_call_status(
         if normalized == "no-answer":
             registry = get_call_patient(CallSid)
             phone = (registry or {}).get("patient_phone", "")
-            if phone:
-                logger.info("ManyChat no-answer flow: disparando para phone=%s sid=%s", phone, CallSid)
-                asyncio.create_task(trigger_no_answer_flow(phone, reason="no_answer"))
+            manychat_user_id = (registry or {}).get("manychat_user_id", "")
+            if phone or manychat_user_id:
+                logger.info(
+                    "ManyChat no-answer flow: disparando para phone=%s manychat_user_id=%s sid=%s",
+                    phone, manychat_user_id, CallSid,
+                )
+                asyncio.create_task(
+                    trigger_no_answer_flow(phone, reason="no_answer", manychat_user_id=manychat_user_id or None)
+                )
             else:
-                logger.info("ManyChat no-answer flow: sin teléfono registrado para sid=%s", CallSid)
+                logger.info("ManyChat no-answer flow: sin teléfono ni manychat_user_id para sid=%s", CallSid)
     return {"status": "received"}
 
 
@@ -194,9 +201,15 @@ async def handle_answering_machine_detection(
             # Disparar flow de ManyChat para buzón de voz
             registry = get_call_patient(CallSid)
             phone = (registry or {}).get("patient_phone", "")
-            if phone:
-                logger.info("ManyChat voicemail flow: disparando para phone=%s sid=%s", phone, CallSid)
-                asyncio.create_task(trigger_no_answer_flow(phone, reason="voicemail"))
+            manychat_user_id = (registry or {}).get("manychat_user_id", "")
+            if phone or manychat_user_id:
+                logger.info(
+                    "ManyChat voicemail flow: disparando para phone=%s manychat_user_id=%s sid=%s",
+                    phone, manychat_user_id, CallSid,
+                )
+                asyncio.create_task(
+                    trigger_no_answer_flow(phone, reason="voicemail", manychat_user_id=manychat_user_id or None)
+                )
             return {"status": "hung_up", "answered_by": answered_by}
         except Exception:
             logger.exception("Failed to hang up voicemail call %s after AMD result %s", CallSid, answered_by)
@@ -247,12 +260,14 @@ async def trigger_outbound_call(
     # Registrar paciente para store_twilio_recording (fallback cuando no hay archive)
     _patient_name = (customer.get("full_name") if customer else None) or patient_name or None
     _patient_id = (str(customer.get("document_number") or "") if customer else None) or patient_document_number or None
+    _manychat_user_id = customer.get("manychat_user_id") if customer else None
     register_call_patient(
         call_sid,
         patient_name=_patient_name,
         patient_id=_patient_id,
         script_name=script_name,
         patient_phone=to_number,
+        manychat_user_id=_manychat_user_id,
     )
 
     return {"call_sid": call_sid, "to": to_number, "script": script_name, "status": "initiated"}

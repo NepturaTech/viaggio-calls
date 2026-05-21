@@ -224,6 +224,13 @@ def _normalize_dataset_patient(record: dict[str, Any]) -> dict[str, Any]:
         "findrisc": data.get("puntaje_findrisc"),
         "objective": data.get("objetivo"),
         "activity_level": data.get("actividad_fisica"),
+        # ManyChat subscriber ID — usado para enviar flows sin pasar por findByPhone
+        "manychat_user_id": _as_text(
+            data.get("manychat_user_id")
+            or data.get("manychat_id")
+            or data.get("subscriber_id")
+            or ""
+        ),
         "source": "viaggio_dataset",
         "_dataset_raw": data,
     }

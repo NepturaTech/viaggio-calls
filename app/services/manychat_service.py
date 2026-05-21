@@ -112,12 +112,18 @@ def _send_flow(subscriber_id: str, flow_ns: str) -> bool:
         return False
 
 
-async def trigger_no_answer_flow(phone: str, reason: str = "no_answer") -> bool:
+async def trigger_no_answer_flow(
+    phone: str,
+    reason: str = "no_answer",
+    manychat_user_id: str | None = None,
+) -> bool:
     """Disparar el flow de ManyChat configurado para llamadas no contestadas.
 
     Args:
-        phone:  Teléfono del paciente en formato E.164 (ej. +573209085770 o 573209085770).
-        reason: Motivo del disparo — solo informativo para el log ('no_answer', 'voicemail').
+        phone:            Teléfono del paciente en formato E.164 (ej. +573209085770).
+        reason:           Motivo del disparo — solo informativo para el log.
+        manychat_user_id: subscriber_id de ManyChat leído directamente del dataset de Viaggio.
+                          Si se provee, se usa directamente y se omite el lookup por teléfono.
 
     Returns:
         True si el flow fue enviado exitosamente, False en cualquier otro caso.
@@ -136,12 +142,21 @@ async def trigger_no_answer_flow(phone: str, reason: str = "no_answer") -> bool:
         logger.debug("ManyChat: MANYCHAT_NO_ANSWER_FLOW_NS no configurada — omitiendo flow (%s)", reason)
         return False
 
-    if not phone:
-        logger.warning("ManyChat: teléfono vacío — no se puede buscar al suscriptor (%s)", reason)
-        return False
-
-    # Ejecutar las llamadas síncronas de httpx en el thread pool para no bloquear el event loop
     loop = asyncio.get_event_loop()
+
+    # Ruta rápida: usar el manychat_user_id del dataset directamente
+    if manychat_user_id:
+        logger.info(
+            "ManyChat: usando manychat_user_id=%s del dataset (reason=%s) — omitiendo findByPhone",
+            manychat_user_id,
+            reason,
+        )
+        return await loop.run_in_executor(None, _send_flow, manychat_user_id, flow_ns)
+
+    # Fallback: buscar al suscriptor por teléfono
+    if not phone:
+        logger.warning("ManyChat: ni manychat_user_id ni teléfono disponibles (%s)", reason)
+        return False
 
     subscriber_id = await loop.run_in_executor(None, _find_subscriber_by_phone, phone)
     if not subscriber_id:
