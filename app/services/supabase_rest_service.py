@@ -339,10 +339,15 @@ def _normalize_dataset_patient(record: dict[str, Any]) -> dict[str, Any]:
         "findrisc": data.get("puntaje_findrisc"),
         "objective": data.get("objetivo"),
         "activity_level": data.get("actividad_fisica"),
-        # manychat_user_id NO se extrae del dataset porque el campo del dataset
-        # contiene el teléfono en lugar del subscriber_id real.
-        # Se inyecta desde _get_viaggio_manychat_lookup() después de normalizar.
-        "manychat_user_id": "",
+        # Intentar leer subscriber_id / manychat_user_id directamente del dataset.
+        # Si el dataset devuelve el teléfono en ese campo, el filtro anti-teléfono
+        # en find_backend_patient_by_phone() lo descartará y usará el lookup directo.
+        "manychat_user_id": _as_text(
+            data.get("subscriber_id")
+            or data.get("manychat_subscriber_id")
+            or data.get("manychat_user_id")
+            or ""
+        ),
         "source": "viaggio_dataset",
         "_dataset_raw": data,
     }
@@ -712,8 +717,13 @@ def list_backend_patients() -> list[dict]:
         for row in rows:
             p = _normalize_dataset_patient(row)
             phone = p.get("phone_number", "")
-            if phone and not p.get("manychat_user_id"):
-                p["manychat_user_id"] = _lookup_manychat_id(mc_lookup, phone)
+            mc_id = p.get("manychat_user_id", "")
+            # Descartar si el dataset devolvió el teléfono en lugar del subscriber_id
+            if mc_id and phone and _phone_digits(mc_id) == _phone_digits(phone):
+                mc_id = ""
+            if not mc_id and phone:
+                mc_id = _lookup_manychat_id(mc_lookup, phone)
+            p["manychat_user_id"] = mc_id
             patients.append(_enrich_patient(p))
         return patients
     if is_lovable_enabled():
@@ -744,13 +754,21 @@ def find_backend_patient_by_phone(phone_number: str) -> dict | None:
             patient = _normalize_dataset_patient(record)
             patient_phone = patient.get("phone_number")
             if patient_phone and any(patient_phone == normalize_phone(candidate) for candidate in candidates):
-                # Inyectar manychat_user_id real desde la tabla directa (el dataset tiene el teléfono)
-                if patient_phone and not patient.get("manychat_user_id"):
-                    patient["manychat_user_id"] = _lookup_manychat_id(mc_lookup, patient_phone)
+                mc_id = patient.get("manychat_user_id", "")
+                # Descartar si el dataset devolvió el teléfono en lugar del subscriber_id
+                if mc_id and _phone_digits(mc_id) in (
+                    _phone_digits(patient_phone),
+                    _phone_digits(patient_phone).lstrip("57") if _phone_digits(patient_phone).startswith("57") else "",
+                ):
+                    mc_id = ""
+                # Si no hay ID válido del dataset, usar el lookup directo de la tabla
+                if not mc_id:
+                    mc_id = _lookup_manychat_id(mc_lookup, patient_phone)
+                patient["manychat_user_id"] = mc_id
                 logger.info(
                     "Patient found in Viaggio pacientes dataset: %s (manychat_user_id=%s)",
                     _preview_row(patient),
-                    patient.get("manychat_user_id") or "—",
+                    mc_id or "—",
                 )
                 return _enrich_patient(patient)
         logger.info(
