@@ -16,6 +16,28 @@ from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
 from app.services.audio_archive_service import delete_call_archive, store_twilio_recording
 from app.services.supabase_rest_service import get_active_call_script
+
+
+def _build_call_purpose(registry: dict | None) -> str:
+    """Construye el texto del propósito de la llamada para el custom field de ManyChat.
+
+    Usa el script_name del registro para obtener el nombre y proyecto del script activo.
+    Ejemplo: "Seguimiento — Proyecto de diabetes mellitus tipo 2"
+    """
+    if not registry:
+        return "Llamada de seguimiento del equipo de salud"
+    script_name = (registry.get("script_name") or "default").strip()
+    try:
+        script = get_active_call_script(script_name)
+        if script:
+            name = (script.get("name") or script_name).strip()
+            project = (script.get("project_name") or "").strip()
+            if project:
+                return f"{name} — {project}"
+            return name
+    except Exception:
+        pass
+    return script_name or "Llamada de seguimiento"
 from app.services.manychat_service import trigger_no_answer_flow
 
 logger = logging.getLogger(__name__)
@@ -153,12 +175,18 @@ async def handle_call_status(
             phone = (registry or {}).get("patient_phone", "")
             manychat_user_id = (registry or {}).get("manychat_user_id", "")
             if phone or manychat_user_id:
+                call_purpose = _build_call_purpose(registry)
                 logger.info(
-                    "ManyChat no-answer flow: disparando para phone=%s manychat_user_id=%s sid=%s",
-                    phone, manychat_user_id, CallSid,
+                    "ManyChat no-answer flow: disparando para phone=%s manychat_user_id=%s purpose='%s' sid=%s",
+                    phone, manychat_user_id, call_purpose, CallSid,
                 )
                 asyncio.create_task(
-                    trigger_no_answer_flow(phone, reason="no_answer", manychat_user_id=manychat_user_id or None)
+                    trigger_no_answer_flow(
+                        phone,
+                        reason="no_answer",
+                        manychat_user_id=manychat_user_id or None,
+                        call_purpose=call_purpose,
+                    )
                 )
             else:
                 logger.info("ManyChat no-answer flow: sin teléfono ni manychat_user_id para sid=%s", CallSid)
@@ -209,12 +237,18 @@ async def handle_answering_machine_detection(
             phone = (registry or {}).get("patient_phone", "")
             manychat_user_id = (registry or {}).get("manychat_user_id", "")
             if phone or manychat_user_id:
+                call_purpose = _build_call_purpose(registry)
                 logger.info(
-                    "ManyChat voicemail flow: disparando para phone=%s manychat_user_id=%s sid=%s",
-                    phone, manychat_user_id, CallSid,
+                    "ManyChat voicemail flow: disparando para phone=%s manychat_user_id=%s purpose='%s' sid=%s",
+                    phone, manychat_user_id, call_purpose, CallSid,
                 )
                 asyncio.create_task(
-                    trigger_no_answer_flow(phone, reason="voicemail", manychat_user_id=manychat_user_id or None)
+                    trigger_no_answer_flow(
+                        phone,
+                        reason="voicemail",
+                        manychat_user_id=manychat_user_id or None,
+                        call_purpose=call_purpose,
+                    )
                 )
             return {"status": "hung_up", "answered_by": answered_by}
         except Exception:

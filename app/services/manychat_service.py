@@ -3,12 +3,16 @@ Servicio para disparar flujos de ManyChat via API cuando una llamada no es conte
 
 Flujo:
   1. Buscar al suscriptor por número de teléfono  →  GET /fb/subscriber/findByPhone
-  2. Enviar el flow configurado                    →  POST /fb/sending/sendFlow
+  2. Setear custom field con el propósito de la llamada → POST /fb/subscriber/setCustomField
+  3. Enviar el flow configurado                    →  POST /fb/sending/sendFlow
 
 Variables de entorno requeridas:
   MANYCHAT_API_KEY            — token de API de ManyChat (sin prefijo "Bearer")
   MANYCHAT_NO_ANSWER_FLOW_NS  — Flow NS del flow a disparar
                                  (se obtiene en ManyChat → Flow → ⋯ → API Trigger → Copy NS)
+
+Custom fields usados:
+  {{cuf_14619329}}  — Propósito / motivo de la llamada no contestada
 
 Referencia: https://api.manychat.com
 """
@@ -83,6 +87,45 @@ def _find_subscriber_by_phone(phone: str) -> str | None:
         return None
 
 
+# ID del custom field de ManyChat que guarda el propósito de la llamada ({{cuf_14619329}})
+_CALL_PURPOSE_FIELD_ID = 14619329
+
+
+def _set_custom_field(subscriber_id: str, field_id: int, value: str) -> bool:
+    """Setea un custom field de ManyChat para el suscriptor.
+
+    Usa POST /fb/subscriber/setCustomField.
+    Retorna True si fue exitoso, False si falló (no bloquea el envío del flow).
+    """
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"{_MANYCHAT_BASE}/fb/subscriber/setCustomField",
+                headers=_headers(),
+                json={
+                    "subscriber_id": subscriber_id,
+                    "field_id": field_id,
+                    "field_value": value,
+                },
+            )
+            resp.raise_for_status()
+            logger.info(
+                "ManyChat: custom field %s seteado para subscriber=%s valor='%s'",
+                field_id,
+                subscriber_id,
+                value,
+            )
+            return True
+    except Exception as exc:
+        logger.warning(
+            "ManyChat setCustomField error (subscriber=%s field=%s): %s",
+            subscriber_id,
+            field_id,
+            exc,
+        )
+        return False
+
+
 def _send_flow(subscriber_id: str, flow_ns: str) -> bool:
     """Envía el flow indicado al suscriptor.
 
@@ -116,6 +159,7 @@ async def trigger_no_answer_flow(
     phone: str,
     reason: str = "no_answer",
     manychat_user_id: str | None = None,
+    call_purpose: str | None = None,
 ) -> bool:
     """Disparar el flow de ManyChat configurado para llamadas no contestadas.
 
@@ -124,6 +168,9 @@ async def trigger_no_answer_flow(
         reason:           Motivo del disparo — solo informativo para el log.
         manychat_user_id: subscriber_id de ManyChat leído directamente del dataset de Viaggio.
                           Si se provee, se usa directamente y se omite el lookup por teléfono.
+        call_purpose:     Texto que describe para qué era la llamada — se guarda en el
+                          custom field {{cuf_14619329}} de ManyChat para que el agente sepa
+                          el contexto si el paciente devuelve la llamada.
 
     Returns:
         True si el flow fue enviado exitosamente, False en cualquier otro caso.
@@ -144,27 +191,31 @@ async def trigger_no_answer_flow(
 
     loop = asyncio.get_event_loop()
 
-    # Ruta rápida: usar el manychat_user_id del dataset directamente
+    # Resolver subscriber_id — ruta rápida o fallback por teléfono
     if manychat_user_id:
         logger.info(
-            "ManyChat: usando manychat_user_id=%s del dataset (reason=%s) — omitiendo findByPhone",
+            "ManyChat: usando manychat_user_id=%s (reason=%s) — omitiendo findByPhone",
             manychat_user_id,
             reason,
         )
-        return await loop.run_in_executor(None, _send_flow, manychat_user_id, flow_ns)
+        subscriber_id = manychat_user_id
+    else:
+        if not phone:
+            logger.warning("ManyChat: ni manychat_user_id ni teléfono disponibles (%s)", reason)
+            return False
+        subscriber_id = await loop.run_in_executor(None, _find_subscriber_by_phone, phone)
+        if not subscriber_id:
+            logger.info(
+                "ManyChat: no se encontró suscriptor para phone=%s (reason=%s) — flow omitido",
+                phone,
+                reason,
+            )
+            return False
 
-    # Fallback: buscar al suscriptor por teléfono
-    if not phone:
-        logger.warning("ManyChat: ni manychat_user_id ni teléfono disponibles (%s)", reason)
-        return False
-
-    subscriber_id = await loop.run_in_executor(None, _find_subscriber_by_phone, phone)
-    if not subscriber_id:
-        logger.info(
-            "ManyChat: no se encontró suscriptor para phone=%s (reason=%s) — flow omitido",
-            phone,
-            reason,
+    # Guardar el propósito de la llamada en {{cuf_14619329}} antes de disparar el flow
+    if call_purpose:
+        await loop.run_in_executor(
+            None, _set_custom_field, subscriber_id, _CALL_PURPOSE_FIELD_ID, call_purpose
         )
-        return False
 
     return await loop.run_in_executor(None, _send_flow, subscriber_id, flow_ns)
