@@ -146,6 +146,7 @@ async def make_outbound_call(
     script_name: str = "default",
     patient_name: str = "",
     patient_document_number: str = "",
+    manychat_user_id: str = "",
 ) -> str:
     """Initiate an outbound call using Twilio."""
     try:
@@ -156,6 +157,8 @@ async def make_outbound_call(
             voice_url += f"&patient_name={quote(patient_name, safe='')}"
         if patient_document_number:
             voice_url += f"&patient_document_number={quote(patient_document_number, safe='')}"
+        if manychat_user_id:
+            voice_url += f"&manychat_user_id={quote(manychat_user_id, safe='')}"
 
         recording_kwargs = {}
         if settings.twilio_recording_enabled:

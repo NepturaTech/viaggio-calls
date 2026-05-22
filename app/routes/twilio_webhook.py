@@ -41,6 +41,8 @@ async def handle_incoming_call(
     # patient_name puede venir como query param cuando se inicia la llamada desde el frontend
     # y el paciente no está registrado en la BD (fallback de nombre para el saludo).
     patient_name_param = (request.query_params.get("patient_name") or "").strip()
+    # manychat_user_id puede venir como query param desde /calls/trigger (subscriber_id del JSON)
+    manychat_user_id_param = (request.query_params.get("manychat_user_id") or "").strip()
 
     # Look up customer in manual data / Supabase
     customer, _ = get_customer_context(customer_phone)
@@ -83,14 +85,18 @@ async def handle_incoming_call(
 
     # Registrar paciente+script para que store_twilio_recording use el nombre correcto
     # aunque el WebSocket se cierre antes de crear el CallAudioArchive.
+    # subscriber_id: prioridad → query param (viene de /calls/trigger) → base de datos
+    _manychat_id = manychat_user_id_param or (customer.get("manychat_user_id") if customer else None)
     register_call_patient(
         CallSid,
         patient_name=customer.get("full_name") if customer else None,
         patient_id=str(customer.get("document_number") or "") if customer else None,
         script_name=script_name,
         patient_phone=customer_phone,
-        manychat_user_id=customer.get("manychat_user_id") if customer else None,
+        manychat_user_id=_manychat_id or None,
     )
+    if _manychat_id:
+        logger.info("manychat_user_id registrado para call %s: %s", CallSid, _manychat_id)
     welcome = get_welcome_greeting(script, customer)
     logger.info(
         "Call context prepared: customer=%s script=%s voice_mode=%s welcome=%s",

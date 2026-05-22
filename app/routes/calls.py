@@ -6,6 +6,7 @@ from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
 from app.services.call_log_service import get_call_with_events, list_calls
 from app.services.twilio_service import make_outbound_call
+from app.db.repositories import register_call_patient
 
 router = APIRouter(tags=["calls"])
 
@@ -14,6 +15,10 @@ class CallTriggerRequest(BaseModel):
     phone_number: str
     patient_name: str | None = None
     patient_document_number: str | None = None
+    # patient_id: alias para patient_document_number (compatibilidad con frontend Lovable)
+    patient_id: str | None = None
+    # subscriber_id: ManyChat subscriber ID — se guarda para disparar flow si no contesta
+    subscriber_id: str | None = None
     source: str | None = "frontend"
     script_name: str | None = "default"
 
@@ -36,12 +41,16 @@ async def get_call(call_sid: str):
 @router.post("/trigger")
 async def trigger_call(payload: CallTriggerRequest):
     """Trigger an outbound call from the admin frontend using JSON."""
+    # patient_id es alias de patient_document_number (el frontend Lovable envía patient_id)
+    doc_number = payload.patient_document_number or payload.patient_id or ""
+
     try:
         call_sid = await make_outbound_call(
             payload.phone_number,
             payload.script_name or "default",
             patient_name=payload.patient_name or "",
-            patient_document_number=payload.patient_document_number or "",
+            patient_document_number=doc_number,
+            manychat_user_id=payload.subscriber_id or "",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -55,13 +64,26 @@ async def trigger_call(payload: CallTriggerRequest):
         customer_id=customer["id"] if customer else None,
     )
 
+    # Registrar subscriber_id en el registry para que esté disponible inmediatamente
+    # si el paciente no contesta (antes de que /voice lo registre)
+    if payload.subscriber_id:
+        register_call_patient(
+            call_sid,
+            patient_name=payload.patient_name or (customer or {}).get("full_name"),
+            patient_id=doc_number or None,
+            script_name=payload.script_name or "default",
+            patient_phone=payload.phone_number,
+            manychat_user_id=payload.subscriber_id,
+        )
+
     resolved_name = (customer or {}).get("full_name") or payload.patient_name
     return {
         "status": "initiated",
         "call_sid": call_sid,
         "to": payload.phone_number,
         "patient_name": resolved_name,
-        "patient_document_number": payload.patient_document_number,
+        "patient_document_number": doc_number or None,
+        "subscriber_id": payload.subscriber_id,
         "source": payload.source,
         "script_name": payload.script_name or "default",
     }
