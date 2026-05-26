@@ -6,7 +6,7 @@ from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
 from app.services.call_log_service import get_call_with_events, list_calls
 from app.services.twilio_service import make_outbound_call
-from app.db.repositories import register_call_patient
+from app.db.repositories import register_call_patient, record_call_attempt, is_in_cooldown
 
 router = APIRouter(tags=["calls"])
 
@@ -44,6 +44,22 @@ async def trigger_call(payload: CallTriggerRequest):
     # patient_id es alias de patient_document_number (el frontend Lovable envía patient_id)
     doc_number = payload.patient_document_number or payload.patient_id or ""
 
+    # Cooldown: rechazar si el mismo número recibió una llamada hace menos de 5 min.
+    # Previene que el flow de ManyChat (u otro sistema externo) dispare una re-llamada
+    # automática justo después de enviar el mensaje de "no contestó".
+    in_cd, remaining = is_in_cooldown(payload.phone_number)
+    if in_cd:
+        logger.warning(
+            "trigger_call rechazado por cooldown: phone=%s, faltan %ds",
+            payload.phone_number,
+            remaining,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Este número recibió una llamada hace menos de 5 minutos. "
+                   f"Espera {remaining} segundos antes de volver a llamar.",
+        )
+
     try:
         call_sid = await make_outbound_call(
             payload.phone_number,
@@ -51,17 +67,22 @@ async def trigger_call(payload: CallTriggerRequest):
             patient_name=payload.patient_name or "",
             patient_document_number=doc_number,
             manychat_user_id=payload.subscriber_id or "",
+            call_source=payload.source or "frontend",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TwilioRestException as exc:
         raise HTTPException(status_code=502, detail=f"Twilio rechazo la llamada: {exc.msg}") from exc
 
+    # Registrar el intento para que el cooldown proteja las próximas 5 minutos
+    record_call_attempt(payload.phone_number)
+
     customer, _ = get_customer_context(payload.phone_number)
     create_call_record(
         twilio_call_sid=call_sid,
         direction="outbound",
         customer_id=customer["id"] if customer else None,
+        call_source=payload.source or "frontend",
     )
 
     # Registrar subscriber_id en el registry para que esté disponible inmediatamente

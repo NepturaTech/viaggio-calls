@@ -7,6 +7,7 @@ Cuando pases a Supabase, reemplaza estos por los que usan el cliente sb.
 """
 import json
 import logging
+import time
 from datetime import datetime
 
 from app.manual_data import CUSTOMERS, APPOINTMENTS, CALL_SCRIPT, CALL_SCRIPTS
@@ -18,6 +19,38 @@ _calls: list[dict] = []
 _call_events: list[dict] = []
 _next_call_id = 1
 _next_event_id = 1
+
+# ---------------------------------------------------------------------------
+# Cooldown anti-retry: evita que un número reciba dos llamadas seguidas.
+# Clave: número normalizado  |  Valor: timestamp (monotonic) de la última llamada.
+# ---------------------------------------------------------------------------
+_call_cooldown: dict[str, float] = {}
+_CALL_COOLDOWN_SECONDS = 300  # 5 minutos de pausa mínima entre llamadas al mismo número
+
+
+def record_call_attempt(phone: str) -> None:
+    """Registra que se acaba de intentar llamar a este número (para cooldown)."""
+    key = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if key:
+        _call_cooldown[key] = time.monotonic()
+
+
+def is_in_cooldown(phone: str) -> tuple[bool, int]:
+    """Devuelve (True, segundos_restantes) si el número está en período de espera.
+
+    Compara los dígitos del número para tolerar variantes de formato (+57 vs sin +).
+    """
+    key = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if not key:
+        return False, 0
+    last = _call_cooldown.get(key)
+    if last is None:
+        return False, 0
+    elapsed = time.monotonic() - last
+    remaining = int(_CALL_COOLDOWN_SECONDS - elapsed)
+    if remaining > 0:
+        return True, remaining
+    return False, 0
 
 # Caché de corta duración para pasar el contexto de paciente (construido desde
 # query params en /voice) al WebSocket handler, que no tiene acceso a la request.

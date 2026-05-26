@@ -10,7 +10,7 @@ from app.services.twilio_service import (
     hangup_call,
     make_outbound_call,
 )
-from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken
+from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken, record_call_attempt, is_in_cooldown
 from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
@@ -91,10 +91,17 @@ async def handle_incoming_call(
         )
 
     # Create call record (in-memory)
+    # call_source: para llamadas entrantes siempre "inbound"; para salientes disparadas
+    # desde /voice (raro) se marca "inbound" también ya que llegan desde Twilio.
+    # El origen real (lovable, whatsapp, viaggio, api) queda en las llamadas salientes
+    # que pasan por /calls/trigger o /twilio/outbound con el parámetro source.
+    _call_source_param = (request.query_params.get("call_source") or "").strip()
+    _call_source = _call_source_param if _call_source_param else ("inbound" if direction == "inbound" else "api")
     create_call_record(
         twilio_call_sid=CallSid,
         direction=direction,
         customer_id=customer["id"] if customer else None,
+        call_source=_call_source,
     )
 
     # Si el paciente fue construido desde params (no existe en BD), guardar en la caché
@@ -265,6 +272,7 @@ async def trigger_outbound_call(
     script_name: str = "default",
     patient_name: str = "",
     patient_document_number: str = "",
+    source: str = "api",
 ):
     """Trigger an outbound call to a specific number.
 
@@ -275,13 +283,30 @@ async def trigger_outbound_call(
         patient_document_number: Número de identificación (cédula) — permite buscar
             datos del paciente en el dataset Viaggio (identificacion) aunque no esté
             registrado en call_patients.
+        source: Origen de la llamada — quién la generó (ej. 'whatsapp', 'viaggio',
+            'api', 'frontend'). Por defecto 'api'.
     """
+    # Cooldown: rechazar si el mismo número recibió una llamada hace menos de 5 min.
+    in_cd, remaining = is_in_cooldown(to_number)
+    if in_cd:
+        logger.warning(
+            "trigger_outbound_call rechazado por cooldown: phone=%s, faltan %ds",
+            to_number,
+            remaining,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Este número recibió una llamada hace menos de 5 minutos. "
+                   f"Espera {remaining} segundos antes de volver a llamar.",
+        )
+
     try:
         call_sid = await make_outbound_call(
             to_number,
             script_name,
             patient_name=patient_name,
             patient_document_number=patient_document_number,
+            call_source=source,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -291,11 +316,15 @@ async def trigger_outbound_call(
             detail=f"Twilio rechazó la llamada: {exc.msg}",
         ) from exc
 
+    # Marcar el intento para activar el cooldown en las próximas 5 minutos
+    record_call_attempt(to_number)
+
     customer, _ = get_customer_context(to_number)
     create_call_record(
         twilio_call_sid=call_sid,
         direction="outbound",
         customer_id=customer["id"] if customer else None,
+        call_source=source,
     )
     # Registrar paciente para store_twilio_recording (fallback cuando no hay archive)
     _patient_name = (customer.get("full_name") if customer else None) or patient_name or None

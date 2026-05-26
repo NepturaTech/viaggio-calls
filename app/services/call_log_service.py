@@ -114,8 +114,14 @@ def create_call_record(
     twilio_call_sid: str,
     direction: str,
     customer_id: int | None = None,
+    call_source: str | None = None,
 ) -> dict:
-    """Create a new call record in-memory and persist a row to Supabase call_logs."""
+    """Create a new call record in-memory and persist a row to Supabase call_logs.
+
+    Args:
+        call_source: Origen de la llamada — quién la generó.
+                     Ejemplos: 'lovable', 'whatsapp', 'manychat', 'api', 'inbound'.
+    """
     repo = CallRepository()
     data: dict = {"twilio_call_sid": twilio_call_sid, "direction": direction}
     if customer_id:
@@ -129,8 +135,16 @@ def create_call_record(
         "status": "initiated",
         "started_at": datetime.utcnow().isoformat(),
     }
+    if call_source:
+        row["call_source"] = call_source
     _post_log_row(row)
 
+    logger.info(
+        "Call record created: sid=%s direction=%s source=%s",
+        twilio_call_sid,
+        direction,
+        call_source or "unknown",
+    )
     return record
 
 

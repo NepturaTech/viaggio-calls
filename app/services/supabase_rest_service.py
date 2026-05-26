@@ -150,7 +150,20 @@ def _dataset_headers() -> dict[str, str]:
     }
 
 
-def _request_dataset_records(dataset_url: str) -> list[dict[str, Any]]:
+def _request_dataset_records(
+    dataset_url: str,
+    max_records: int = 1000,
+) -> list[dict[str, Any]]:
+    """Fetch records from a Viaggio dataset URL with in-process cache.
+
+    Args:
+        dataset_url:  Full dataset endpoint URL.
+        max_records:  Hard cap on total records fetched — pagination stops once
+                      this many records are accumulated.  Prevents unbounded
+                      memory growth when datasets are large (e.g. food_entries).
+                      Default 1000; pass a lower value for datasets where you
+                      only need the most-recent N entries.
+    """
     settings = _settings()
     key = (
         settings.external_viaggio_dataset_api_key
@@ -166,7 +179,7 @@ def _request_dataset_records(dataset_url: str) -> list[dict[str, Any]]:
         return cached[1]
 
     try:
-        with httpx.Client(timeout=5.0) as client:
+        with httpx.Client(timeout=8.0) as client:
             records: list[dict[str, Any]] = []
             offset = 0
             limit = 100
@@ -184,6 +197,11 @@ def _request_dataset_records(dataset_url: str) -> list[dict[str, Any]]:
                     page_records = []
                 records.extend(page_records)
 
+                # Respect hard cap — stop paginating once we have enough records.
+                if len(records) >= max_records:
+                    records = records[:max_records]
+                    break
+
                 has_more = bool(payload.get("has_more")) if isinstance(payload, dict) else False
                 page_limit = int(payload.get("limit") or limit) if isinstance(payload, dict) else limit
                 page_offset = int(payload.get("offset") or offset) if isinstance(payload, dict) else offset
@@ -197,6 +215,9 @@ def _request_dataset_records(dataset_url: str) -> list[dict[str, Any]]:
         return records
     except Exception as exc:
         logger.warning("Viaggio dataset request failed for %s: %s", dataset_url, exc)
+        # Return stale cache if available — better than nothing on transient timeout
+        if cached:
+            return cached[1]
         return []
 
 
@@ -1167,10 +1188,10 @@ def warm_all_caches() -> dict[str, Any]:
     except Exception as exc:
         results["script"] = f"error: {exc}"
 
-    # 3. Dataset de pacientes Viaggio
+    # 3. Dataset de pacientes Viaggio — cap 1000 (los proyectos actuales tienen ~767)
     if settings.external_viaggio_pacientes_dataset_url:
         try:
-            rows = _request_dataset_records(settings.external_viaggio_pacientes_dataset_url)
+            rows = _request_dataset_records(settings.external_viaggio_pacientes_dataset_url, max_records=1000)
             results["viaggio_patients"] = f"ok ({len(rows)} pacientes)"
         except Exception as exc:
             results["viaggio_patients"] = f"error: {exc}"
@@ -1187,15 +1208,32 @@ def warm_all_caches() -> dict[str, Any]:
     else:
         results["viaggio_manychat_lookup"] = "disabled"
 
-    # 4. Dataset evalml Viaggio (predicciones ML)
+    # 4. Dataset evalml Viaggio (predicciones ML) — max 500 filas (solo usamos 1 por paciente)
     if settings.external_viaggio_evalml_dataset_url:
         try:
-            rows = _request_dataset_records(settings.external_viaggio_evalml_dataset_url)
+            rows = _request_dataset_records(settings.external_viaggio_evalml_dataset_url, max_records=500)
             results["viaggio_evalml"] = f"ok ({len(rows)} rows)"
         except Exception as exc:
             results["viaggio_evalml"] = f"error: {exc}"
     else:
         results["viaggio_evalml"] = "disabled"
+
+    # 4b. Datasets secundarios — pre-calentar con límites bajos para que llamadas
+    #     concurrentes usen la caché compartida en vez de cada una hacer el fetch.
+    #     Solo cargamos los más recientes porque _summarize_* usa [:3] de todas formas.
+    for label, url, cap in [
+        ("viaggio_food_entries",    settings.external_viaggio_food_entries_dataset_url,    200),
+        ("viaggio_conversaciones",  settings.external_viaggio_conversaciones_dataset_url,  200),
+        ("viaggio_data_step",       settings.external_viaggio_data_step_dataset_url,       200),
+    ]:
+        if url:
+            try:
+                rows = _request_dataset_records(url, max_records=cap)
+                results[label] = f"ok ({len(rows)} rows)"
+            except Exception as exc:
+                results[label] = f"error: {exc}"
+        else:
+            results[label] = "disabled"
 
     # 5. Huella interviewees
     if is_huella_enabled():
