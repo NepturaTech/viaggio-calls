@@ -15,7 +15,11 @@ from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
 from app.services.audio_archive_service import delete_call_archive, store_twilio_recording
-from app.services.supabase_rest_service import get_active_call_script
+from app.services.supabase_rest_service import (
+    get_active_call_script,
+    get_active_call_script_cached,
+    find_patient_from_warm_cache,
+)
 
 
 def _build_call_purpose(registry: dict | None) -> str:
@@ -54,67 +58,88 @@ async def handle_incoming_call(
     To: str = Form(...),
     CallStatus: str = Form("ringing"),
 ):
-    """Handle incoming Twilio voice call — connect to ConversationRelay."""
+    """Handle incoming Twilio voice call — connect to ConversationRelay.
+
+    CRÍTICO DE LATENCIA: este handler debe devolver el TwiML en <200 ms.
+    Cualquier lookup de base de datos aquí bloquea el saludo — el paciente
+    escucha silencio hasta que responde. Todo el contexto pesado (Viaggio,
+    Huella, datasets) se carga en background en el WebSocket handler.
+    """
     logger.info("Incoming call: SID=%s, From=%s, To=%s, Status=%s", CallSid, From, To, CallStatus)
 
     customer_phone = To if From == settings.twilio_phone_number else From
     direction = "outbound" if From == settings.twilio_phone_number else "inbound"
     script_name = request.query_params.get("script_name", "default")
-    # patient_name puede venir como query param cuando se inicia la llamada desde el frontend
-    # y el paciente no está registrado en la BD (fallback de nombre para el saludo).
-    patient_name_param = (request.query_params.get("patient_name") or "").strip()
-    # manychat_user_id puede venir como query param desde /calls/trigger (subscriber_id del JSON)
+    patient_name_param  = (request.query_params.get("patient_name") or "").strip()
+    patient_doc_param   = (request.query_params.get("patient_document_number") or "").strip()
     manychat_user_id_param = (request.query_params.get("manychat_user_id") or "").strip()
-
-    # Look up customer in manual data / Supabase
-    customer, _ = get_customer_context(customer_phone)
-
-    # Si no se encontró en la BD pero se pasaron datos como parámetros, construir un
-    # cliente mínimo para que el saludo, el prompt y el contexto del dataset usen
-    # el nombre y documento correctos.
-    patient_doc_param = (request.query_params.get("patient_document_number") or "").strip()
-    if not customer and (patient_name_param or patient_doc_param):
-        customer = {
-            "id": None,
-            "full_name": patient_name_param or None,
-            "phone_number": customer_phone,
-            "document_number": patient_doc_param or None,
-            "hospital_name": None,
-            "project_name": None,
-            "source": "param",
-        }
-        logger.info(
-            "Using param patient: name=%s document_number=%s for call %s",
-            patient_name_param,
-            patient_doc_param,
-            CallSid,
-        )
-
-    # Create call record (in-memory)
-    # call_source: para llamadas entrantes siempre "inbound"; para salientes disparadas
-    # desde /voice (raro) se marca "inbound" también ya que llegan desde Twilio.
-    # El origen real (lovable, whatsapp, viaggio, api) queda en las llamadas salientes
-    # que pasan por /calls/trigger o /twilio/outbound con el parámetro source.
-    _call_source_param = (request.query_params.get("call_source") or "").strip()
-    _call_source = _call_source_param if _call_source_param else ("inbound" if direction == "inbound" else "api")
-    create_call_record(
-        twilio_call_sid=CallSid,
-        direction=direction,
-        customer_id=customer["id"] if customer else None,
-        call_source=_call_source,
+    _call_source_param  = (request.query_params.get("call_source") or "").strip()
+    _call_source = _call_source_param if _call_source_param else (
+        "inbound" if direction == "inbound" else "api"
     )
 
-    # Si el paciente fue construido desde params (no existe en BD), guardar en la caché
-    # para que el WebSocket handler lo recupere durante _load_session_context.
-    if customer and customer.get("source") == "param":
+    # ── FAST PATH: datos del paciente SIN llamadas de red ───────────────────
+    # Prioridad:
+    #   1. Registro en memoria (para llamadas salientes ya registradas por
+    #      /calls/trigger o /twilio/outbound — siempre disponible antes de
+    #      que el paciente conteste).
+    #   2. Query params (patient_name enviado en la voice_url).
+    #   3. Scan del caché de datasets en memoria (O(n) sin red, solo si warm).
+    #   4. None → saludo genérico, el WebSocket carga el contexto completo.
+    #
+    # NO se llama get_customer_context() aquí — ese fetch puede bloquear 8-20 s
+    # y el paciente escucharía silencio. El WebSocket lo hace en background.
+
+    _registry = get_call_patient(CallSid)
+
+    if _registry and _registry.get("patient_name"):
+        # Llamada saliente ya registrada — usar datos del registro (instant)
+        customer = {
+            "id":              None,
+            "full_name":       _registry["patient_name"],
+            "phone_number":    customer_phone,
+            "document_number": _registry.get("patient_id") or None,
+            "hospital_name":   _registry.get("hospital_name") or None,
+            "project_name":    _registry.get("project_name") or None,
+            "manychat_user_id":_registry.get("manychat_user_id") or None,
+            "source":          "registry",
+        }
+        logger.info(
+            "FAST PATH (registry): name=%s hospital=%s for call %s",
+            customer["full_name"], customer["hospital_name"], CallSid,
+        )
+    elif patient_name_param or patient_doc_param:
+        # Params en la URL (fallback para llamadas sin registro previo)
+        customer = {
+            "id": None, "full_name": patient_name_param or None,
+            "phone_number": customer_phone,
+            "document_number": patient_doc_param or None,
+            "hospital_name": None, "project_name": None, "source": "param",
+        }
         store_pending_call_params(CallSid, customer)
+        logger.info("FAST PATH (params): name=%s for call %s", patient_name_param, CallSid)
+    else:
+        # Último recurso: scan del caché en memoria (sin red, <50 ms si warm)
+        customer = find_patient_from_warm_cache(customer_phone)
+        if customer:
+            logger.info(
+                "FAST PATH (warm cache): name=%s for call %s",
+                customer.get("full_name"), CallSid,
+            )
+        else:
+            logger.info("FAST PATH: no patient data available for call %s — generic greeting", CallSid)
 
-    # Get active script for the welcome greeting
-    script = get_active_call_script(script_name)
+    # ── Script: solo desde caché (sin red) ──────────────────────────────────
+    # get_active_call_script_cached() es instant; si aún no está warm usamos
+    # el script local de manual_data.py como fallback.
+    script = get_active_call_script_cached(script_name)
+    if script is None:
+        # Caché fría — usar script local fallback (nunca bloquea)
+        from app.manual_data import CALL_SCRIPT
+        script = CALL_SCRIPT
+        logger.info("Script cache cold — using local fallback for call %s", CallSid)
 
-    # Registrar paciente+script para que store_twilio_recording use el nombre correcto
-    # aunque el WebSocket se cierre antes de crear el CallAudioArchive.
-    # subscriber_id: prioridad → query param (viene de /calls/trigger) → base de datos
+    # ── Registro del paciente (instant, in-memory) ───────────────────────────
     _manychat_id = manychat_user_id_param or (customer.get("manychat_user_id") if customer else None)
     register_call_patient(
         CallSid,
@@ -123,26 +148,29 @@ async def handle_incoming_call(
         script_name=script_name,
         patient_phone=customer_phone,
         manychat_user_id=_manychat_id or None,
+        hospital_name=customer.get("hospital_name") if customer else None,
+        project_name=customer.get("project_name") if customer else None,
     )
     if _manychat_id:
         logger.info("manychat_user_id registrado para call %s: %s", CallSid, _manychat_id)
+
+    # ── Call record (in-memory, customer_id=None es OK) ──────────────────────
+    create_call_record(
+        twilio_call_sid=CallSid,
+        direction=direction,
+        customer_id=None,   # Se enriquece en el WebSocket; no bloqueamos por el ID aquí
+        call_source=_call_source,
+    )
+
+    # ── Saludo de bienvenida y TwiML ─────────────────────────────────────────
     welcome = get_welcome_greeting(script, customer)
     logger.info(
-        "Call context prepared: customer=%s script=%s voice_mode=%s welcome=%s",
-        {
-            "full_name": customer.get("full_name") if customer else None,
-            "phone_number": customer.get("phone_number") if customer else customer_phone,
-            "hospital_name": customer.get("hospital_name") if customer else None,
-            "project_name": customer.get("project_name") if customer else None,
-            "source": customer.get("source") if customer else None,
-        },
-        {
-            "name": script.get("name") if script else None,
-            "project_name": script.get("project_name") if script else None,
-            "requested_script_name": script_name,
-        },
-        settings.twilio_voice_mode,
-        welcome,
+        "Call context prepared: name=%s hospital=%s script=%s source=%s welcome=%s…",
+        customer.get("full_name") if customer else None,
+        customer.get("hospital_name") if customer else None,
+        script.get("name") if script else None,
+        customer.get("source") if customer else None,
+        welcome[:80],
     )
 
     # Return TwiML using the configured voice mode
@@ -337,6 +365,8 @@ async def trigger_outbound_call(
         script_name=script_name,
         patient_phone=to_number,
         manychat_user_id=_manychat_user_id,
+        hospital_name=customer.get("hospital_name") if customer else None,
+        project_name=customer.get("project_name") if customer else None,
     )
 
     return {"call_sid": call_sid, "to": to_number, "script": script_name, "status": "initiated"}

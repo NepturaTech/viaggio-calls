@@ -82,14 +82,23 @@ def register_call_patient(
     script_name: str | None = None,
     patient_phone: str | None = None,
     manychat_user_id: str | None = None,
+    hospital_name: str | None = None,
+    project_name: str | None = None,
 ) -> None:
-    """Registra datos del paciente asociados a un call_sid."""
+    """Registra datos del paciente asociados a un call_sid.
+
+    hospital_name y project_name se usan en /voice para construir el saludo
+    de bienvenida SIN necesidad de hacer lookups a la base de datos.
+    """
+    existing = _call_patient_registry.get(call_sid, {})
     _call_patient_registry[call_sid] = {
-        "patient_name": patient_name or "",
-        "patient_id": patient_id or "",
-        "script_name": script_name or "default",
-        "patient_phone": patient_phone or "",
-        "manychat_user_id": manychat_user_id or "",
+        "patient_name":    patient_name    or existing.get("patient_name", ""),
+        "patient_id":      patient_id      or existing.get("patient_id", ""),
+        "script_name":     script_name     or existing.get("script_name", "default"),
+        "patient_phone":   patient_phone   or existing.get("patient_phone", ""),
+        "manychat_user_id":manychat_user_id or existing.get("manychat_user_id", ""),
+        "hospital_name":   hospital_name   or existing.get("hospital_name", ""),
+        "project_name":    project_name    or existing.get("project_name", ""),
     }
 
 

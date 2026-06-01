@@ -87,15 +87,21 @@ async def trigger_call(payload: CallTriggerRequest):
 
     # Registrar subscriber_id en el registry para que esté disponible inmediatamente
     # si el paciente no contesta (antes de que /voice lo registre)
-    if payload.subscriber_id:
-        register_call_patient(
-            call_sid,
-            patient_name=payload.patient_name or (customer or {}).get("full_name"),
-            patient_id=doc_number or None,
-            script_name=payload.script_name or "default",
-            patient_phone=payload.phone_number,
-            manychat_user_id=payload.subscriber_id,
-        )
+    # Registrar siempre (no solo cuando hay subscriber_id) para que /voice
+    # pueda usar el registry y evitar el lookup bloqueante de base de datos.
+    _reg_name = payload.patient_name or (customer or {}).get("full_name")
+    _reg_hospital = (customer or {}).get("hospital_name")
+    _reg_project = (customer or {}).get("project_name")
+    register_call_patient(
+        call_sid,
+        patient_name=_reg_name,
+        patient_id=doc_number or None,
+        script_name=payload.script_name or "default",
+        patient_phone=payload.phone_number,
+        manychat_user_id=payload.subscriber_id or (customer or {}).get("manychat_user_id"),
+        hospital_name=_reg_hospital,
+        project_name=_reg_project,
+    )
 
     resolved_name = (customer or {}).get("full_name") or payload.patient_name
     return {

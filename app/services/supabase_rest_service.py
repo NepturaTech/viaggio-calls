@@ -1257,3 +1257,62 @@ def get_warmup_status() -> dict[str, Any]:
         "last_warmup_ago_seconds": round(time.monotonic() - _warmup_last_at, 1) if _warmup_last_at else None,
         "sources": _warmup_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# Helpers de acceso rápido (sin red) — para que /voice sea instantáneo
+# ---------------------------------------------------------------------------
+
+def get_active_call_script_cached(script_name: str | None = None) -> dict | None:
+    """Devuelve el script desde caché en memoria SIN hacer ninguna llamada de red.
+
+    Usado por /voice para obtener el script en <1 ms.
+    Retorna None si la caché está fría (warmup aún no terminó).
+    """
+    normalized = (script_name or "").strip()
+    now = time.monotonic()
+    # Intentar en este orden: nombre exacto → "default" → cualquier entrada cacheada
+    for key in [normalized or "default", "default", ""]:
+        cached = _script_cache.get(key)
+        if cached and (now - cached[0]) < _SCRIPT_CACHE_TTL_SECONDS:
+            return dict(cached[1])
+    # Último intento: primera entrada disponible (cualquier script cacheado)
+    for key, cached in _script_cache.items():
+        if cached and (now - cached[0]) < _SCRIPT_CACHE_TTL_SECONDS:
+            return dict(cached[1])
+    return None
+
+
+def find_patient_from_warm_cache(phone_number: str) -> dict | None:
+    """Busca un paciente en el caché de datasets sin hacer ninguna llamada de red.
+
+    Si el caché de pacientes está caliente (warmup completado), devuelve el
+    paciente enriquecido en <50 ms (scan en memoria de ~767 registros).
+    Si el caché está frío, devuelve None inmediatamente (sin esperar).
+
+    Usado por /voice para construir el saludo sin bloquear en fetches de Viaggio.
+    """
+    settings = _settings()
+    url = settings.external_viaggio_pacientes_dataset_url
+    if not url:
+        return None
+
+    now = time.monotonic()
+    cached = _dataset_cache.get(url)
+    if not cached or (now - cached[0]) >= _DATASET_CACHE_TTL_SECONDS:
+        return None  # Caché fría — no esperar, el WebSocket cargará el contexto
+
+    records = cached[1]
+    candidates = _phone_candidates(phone_number)
+    mc_lookup = _viaggio_manychat_lookup_cache[1] if _viaggio_manychat_lookup_cache else {}
+
+    for record in records:
+        patient = _normalize_dataset_patient(record)
+        patient_phone = patient.get("phone_number")
+        if patient_phone and any(patient_phone == normalize_phone(c) for c in candidates):
+            # Enriquecer con manychat_user_id si está en lookup
+            if not patient.get("manychat_user_id") and patient_phone:
+                mc_id = _lookup_manychat_id(mc_lookup, patient_phone)
+                patient["manychat_user_id"] = mc_id
+            return _enrich_patient(patient)
+    return None
