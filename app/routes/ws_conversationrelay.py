@@ -18,6 +18,7 @@ from app.services.openai_service import (
     MODERATION_CLOSE_RESPONSE,
     MODERATION_REDIRECT_RESPONSE,
     generate_response,
+    generate_response_stream,
     moderate_user_input,
 )
 from app.services.report_service import send_whatsapp_report
@@ -521,14 +522,57 @@ async def conversation_relay_ws(websocket: WebSocket):
                         session.pending_hangup = True
                     else:
                         ai_response = MODERATION_REDIRECT_RESPONSE
+                    # Respuesta fija — enviar directamente sin streaming
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": ai_response,
+                        "last": True,
+                    }))
                 else:
                     session.pending_hangup = _should_end_call(user_text)
                     _report_requested = bool(REPORT_REQUEST_PATTERN.search(user_text))
-                    ai_response = await generate_response(
+
+                    # ── Streaming de respuesta Claude ────────────────────────
+                    # Enviamos tokens a Twilio conforme Claude los genera.
+                    # ElevenLabs empieza a sintetizar voz con los primeros tokens
+                    # (~200-400 ms) en lugar de esperar la respuesta completa.
+                    #
+                    # Estrategia de buffer: acumular hasta encontrar puntuación
+                    # de frase (.!?,;:) o superar 60 chars → flush como chunk.
+                    # Esto da chunks coherentes al TTS sin esperar la respuesta
+                    # completa, reduciendo la latencia percibida de 2-5 s a <1 s.
+                    _FLUSH_ON = frozenset(".!?,;:")
+                    _buf = ""
+                    _tokens: list[str] = []
+
+                    async for _tok in generate_response_stream(
                         session.system_prompt,
                         session.conversation_history[:-1],
                         user_text,
-                    )
+                    ):
+                        _tokens.append(_tok)
+                        _buf += _tok
+                        # Flush en puntuación o al acumular suficientes chars
+                        if any(c in _tok for c in _FLUSH_ON) or len(_buf) >= 60:
+                            await websocket.send_text(json.dumps({
+                                "type": "text",
+                                "token": _buf,
+                                "last": False,
+                            }))
+                            _buf = ""
+
+                    # Enviar el resto del buffer + señal de fin
+                    # IMPORTANTE: NO enviar "lang" — Twilio usa el idioma del TwiML (es-CO).
+                    # Si se envía "lang: es-US" con TwiML "es-CO" → error 64106.
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": _buf,   # puede ser "" si el último chunk ya fue enviado
+                        "last": True,
+                    }))
+
+                    ai_response = "".join(_tokens)
+                    # ─────────────────────────────────────────────────────────
+
                     # Enviar reporte WhatsApp si el usuario lo solicitó y hay documento
                     if _report_requested and session.patient_id:
                         asyncio.create_task(send_whatsapp_report(
@@ -550,15 +594,6 @@ async def conversation_relay_ws(websocket: WebSocket):
                 if archive is not None:
                     archive.append_transcript("assistant", ai_response)
 
-                # IMPORTANTE: NO enviar "lang" en la respuesta.
-                # Twilio usa el idioma configurado en el TwiML (es-CO).
-                # Si se envía "lang: es-US" y el TwiML dice "es-CO", Twilio lanza error 64106.
-                response_payload = json.dumps({
-                    "type": "text",
-                    "token": ai_response,
-                    "last": True,
-                })
-                await websocket.send_text(response_payload)
                 if session.pending_hangup:
                     await _hangup_after_response(session.call_sid)
 
