@@ -68,14 +68,22 @@ async def generate_response_stream(
         return
 
     messages = list(conversation_history)
-    messages.append({"role": "user", "content": user_message})
+    # Recordatorio anti-markdown en cada turno: Claude Haiku tiende a usar
+    # formato visual incluso cuando el system prompt lo prohíbe. Este prefijo
+    # fuerza el comportamiento correcto sin modificar el system prompt cacheado.
+    _reminder = (
+        "[REGLA ABSOLUTA: responde SOLO en texto hablado. "
+        "CERO asteriscos, negritas, listas, viñetas ni guiones de lista. "
+        "Máximo 2-3 frases. Si tienes más info, pausa y espera.]\n\n"
+    )
+    messages.append({"role": "user", "content": _reminder + user_message})
 
     try:
         async with client.messages.stream(
             model=settings.anthropic_model,
             system=_system_param(system_prompt),
             messages=messages,
-            max_tokens=180,
+            max_tokens=280,
             temperature=0.4,
         ) as stream:
             async for text in stream.text_stream:
