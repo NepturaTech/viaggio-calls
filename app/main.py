@@ -19,6 +19,7 @@ from app.routes.calls import router as calls_router
 from app.routes.errors import router as errors_router
 from app.routes.health import router as health_router
 from app.routes.patients import router as patients_router
+from app.routes.logs import router as logs_router
 from app.routes.scripts import router as scripts_router
 from app.routes.twilio_webhook import router as twilio_router
 from app.routes.ws_conversationrelay import router as ws_router
@@ -113,6 +114,7 @@ async def capture_backend_errors(request, call_next):
         raise
 
 app.include_router(health_router)
+app.include_router(logs_router)
 app.include_router(admin_router, prefix="/admin")
 app.include_router(errors_router, prefix="/errors")
 app.include_router(calls_router, prefix="/calls")
