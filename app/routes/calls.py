@@ -1,6 +1,10 @@
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from twilio.base.exceptions import TwilioRestException
+
+logger = logging.getLogger(__name__)
 
 from app.services.call_log_service import create_call_record
 from app.services.customer_service import get_customer_context
