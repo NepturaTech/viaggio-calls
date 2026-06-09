@@ -11,7 +11,7 @@ from app.services.twilio_service import (
     make_outbound_call,
 )
 from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken, record_call_attempt, is_in_cooldown
-from app.services.call_log_service import create_call_record
+from app.services.call_log_service import create_call_record, mark_call_not_answered
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
 from app.services.audio_archive_service import delete_call_archive, store_twilio_recording
@@ -204,9 +204,11 @@ async def handle_call_status(
     normalized = (CallStatus or "").strip().lower()
     if normalized in {"no-answer", "busy", "failed", "canceled"}:
         delete_call_archive(CallSid)
+        registry = get_call_patient(CallSid)
+        # Persistir en Supabase por qué no hubo conversación (no_answer, busy…)
+        mark_call_not_answered(CallSid, normalized.replace("-", "_"), registry=registry)
         # Disparar flow de ManyChat si el paciente no contestó
         if normalized == "no-answer":
-            registry = get_call_patient(CallSid)
             phone = (registry or {}).get("patient_phone", "")
             manychat_user_id = (registry or {}).get("manychat_user_id", "")
             if phone or manychat_user_id:
@@ -267,8 +269,10 @@ async def handle_answering_machine_detection(
             hangup_call(CallSid)
             delete_call_archive(CallSid)
             logger.info("Call %s colgada por voicemail AMD (%s)", CallSid, answered_by)
-            # Disparar flow de ManyChat para buzón de voz
             registry = get_call_patient(CallSid)
+            # Persistir en Supabase que contestó el buzón, no el paciente
+            mark_call_not_answered(CallSid, "voicemail", registry=registry)
+            # Disparar flow de ManyChat para buzón de voz
             phone = (registry or {}).get("patient_phone", "")
             manychat_user_id = (registry or {}).get("manychat_user_id", "")
             if phone or manychat_user_id:

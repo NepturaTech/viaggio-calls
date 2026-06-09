@@ -202,6 +202,44 @@ def get_call_with_events(call_sid: str) -> dict | None:
     return {**call, "events": event_repo.list_by_call_id(call["id"])}
 
 
+# Sids ya marcados como no contestados — finalize_call (disparado al cerrar el
+# WebSocket) no debe pisar ese status con el "completed" por defecto.
+_not_answered_sids: set[str] = set()
+
+
+def mark_call_not_answered(
+    call_sid: str,
+    status: str,
+    registry: dict | None = None,
+) -> None:
+    """Persiste en Supabase que la llamada terminó sin que el paciente contestara.
+
+    Args:
+        status: 'no_answer', 'busy', 'failed', 'canceled' o 'voicemail'.
+        registry: registro in-memory del paciente (get_call_patient) — aporta
+            los datos que normalmente enriquecería el WebSocket, que nunca se
+            abre cuando el paciente no contesta. Sin esta función, el call_log
+            quedaría en 'initiated' para siempre.
+    """
+    _not_answered_sids.add(call_sid)
+    if len(_not_answered_sids) > 5000:
+        _not_answered_sids.clear()
+        _not_answered_sids.add(call_sid)
+    updates: dict = {
+        "status": status,
+        "ended_at": datetime.utcnow().isoformat(),
+    }
+    if registry:
+        if registry.get("patient_name"):
+            updates["patient_name"] = registry["patient_name"]
+        if registry.get("patient_id"):
+            updates["patient_document_number"] = str(registry["patient_id"])
+        if registry.get("script_name"):
+            updates["script_name"] = registry["script_name"]
+    _patch_log_row(call_sid, updates)
+    logger.info("Call %s registrada en call_logs como '%s'", call_sid, status)
+
+
 def finalize_call(
     call_id: int,
     final_status: str,
@@ -221,5 +259,9 @@ def finalize_call(
             }
             if summary:
                 updates["transcript_summary"] = summary[:2000]
+            if call_sid in _not_answered_sids and final_status == "completed":
+                # La llamada ya quedó marcada como no contestada/voicemail —
+                # el cierre del WebSocket no debe pisar ese status.
+                updates.pop("status")
             _patch_log_row(call_sid, updates)
     return call
