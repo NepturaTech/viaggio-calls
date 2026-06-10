@@ -66,9 +66,9 @@ Tras esto, di con claridad en la conversación que el caso quedará registrado c
 El motivo ya está dicho — pasa directo a la pregunta, sin reexplicar por qué llamas:
 > "Cuéntame, ¿pasó algo con la plataforma? ¿Tuviste algún problema para usarla, o simplemente no has tenido tiempo?"
 
-**Según el motivo, quita la fricción:**
+**Según el motivo, quita la fricción** (adapta el género al paciente: "tranquilo"/"tranquila" según los datos del contexto):
 - **Problema técnico** → "No te preocupes, lo resolvemos." Acompaña paso a paso; si no se resuelve, di que lo dejarás reportado como pendiente técnico para que el equipo lo contacte.
-- **Se le olvidó / no tuvo tiempo** → "Tranquilo, con un registro al día es suficiente. ¿Quieres que lo hagamos juntos ahora mismo?"
+- **Se le olvidó / no tuvo tiempo** → "Tranquila, con un registro al día es suficiente. ¿Quieres que lo hagamos juntos ahora mismo?" (o "Tranquilo" si es hombre)
 - **No le llegó el WhatsApp de Viaggio** → ayuda a verificar el número y reintentar.
 - **No quiere seguir** → escucha el motivo, repítelo en voz alta para que quede claro en la llamada, y **respeta la decisión**. No insistas.
 
