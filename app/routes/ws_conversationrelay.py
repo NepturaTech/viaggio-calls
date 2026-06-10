@@ -302,7 +302,8 @@ async def conversation_relay_ws(websocket: WebSocket):
     await websocket.accept()
     session = ConversationSession()
     # script_name viaja como query param en la URL del WebSocket generada por el TwiML
-    session.script_name = (websocket.query_params.get("script_name") or "default").strip()
+    from app.utils.normalization import normalize_script_name
+    session.script_name = normalize_script_name(websocket.query_params.get("script_name"))
     archive: CallAudioArchive | None = None
     archive_finalized = False
     loop = asyncio.get_event_loop()

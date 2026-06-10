@@ -69,7 +69,8 @@ async def handle_incoming_call(
 
     customer_phone = To if From == settings.twilio_phone_number else From
     direction = "outbound" if From == settings.twilio_phone_number else "inbound"
-    script_name = request.query_params.get("script_name", "default")
+    from app.utils.normalization import normalize_script_name
+    script_name = normalize_script_name(request.query_params.get("script_name", "default"))
     patient_name_param  = (request.query_params.get("patient_name") or "").strip()
     patient_doc_param   = (request.query_params.get("patient_document_number") or "").strip()
     manychat_user_id_param = (request.query_params.get("manychat_user_id") or "").strip()

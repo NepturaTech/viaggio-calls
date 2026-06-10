@@ -22,3 +22,5 @@ def setup_logging():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("python_multipart").setLevel(logging.WARNING)
     logging.getLogger("websockets.client").setLevel(logging.INFO)
+    # twilio.http_client imprime en INFO todos los headers de cada request/response
+    logging.getLogger("twilio.http_client").setLevel(logging.WARNING)

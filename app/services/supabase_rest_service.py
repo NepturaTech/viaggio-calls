@@ -861,8 +861,11 @@ def list_backend_appointments(patient: dict | None, fallback_customer_id: int | 
 
 
 def get_active_call_script(script_name: str | None = None) -> dict:
+    from app.utils.normalization import normalize_script_name
     settings = _settings()
-    normalized_name = (script_name or "").strip()
+    normalized_name = normalize_script_name(script_name)
+    if normalized_name == "default":
+        normalized_name = ""
     cache_key = normalized_name or "default"
 
     # Servir desde caché si está vigente (evita queries lentas en el webhook)
@@ -1269,10 +1272,11 @@ def get_active_call_script_cached(script_name: str | None = None) -> dict | None
     Usado por /voice para obtener el script en <1 ms.
     Retorna None si la caché está fría (warmup aún no terminó).
     """
-    normalized = (script_name or "").strip()
+    from app.utils.normalization import normalize_script_name
+    normalized = normalize_script_name(script_name)
     now = time.monotonic()
     # Intentar en este orden: nombre exacto → "default" → cualquier entrada cacheada
-    for key in [normalized or "default", "default", ""]:
+    for key in [normalized, "default", ""]:
         cached = _script_cache.get(key)
         if cached and (now - cached[0]) < _SCRIPT_CACHE_TTL_SECONDS:
             return dict(cached[1])

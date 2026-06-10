@@ -151,8 +151,10 @@ async def make_outbound_call(
 ) -> str:
     """Initiate an outbound call using Twilio."""
     try:
+        from app.utils.normalization import normalize_script_name
+        script_name = normalize_script_name(script_name)
         base_url = _validate_public_base_url()
-        encoded_script_name = quote(script_name or "default", safe="")
+        encoded_script_name = quote(script_name, safe="")
         voice_url = f"{base_url}/twilio/voice?script_name={encoded_script_name}"
         if patient_name:
             voice_url += f"&patient_name={quote(patient_name, safe='')}"
