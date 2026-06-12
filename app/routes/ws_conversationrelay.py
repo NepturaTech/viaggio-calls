@@ -459,6 +459,29 @@ async def conversation_relay_ws(websocket: WebSocket):
                         "Context ready — archive created for call %s (patient=%s script=%s)",
                         session.call_sid, session.customer_name, session.script_name,
                     )
+
+                    # ── Sembrar el saludo de bienvenida en el historial ──────────
+                    # Twilio ConversationRelay YA reprodujo el welcome_greeting del TwiML
+                    # por TTS al conectar la llamada. Si no lo registramos como primer
+                    # turno del asistente, el modelo arranca con historial vacío y vuelve
+                    # a saludar ("Hola, hablo con X?") en el turno 1 → doble saludo,
+                    # sensación de "pierde el hilo" y cuelgues. Lo sembramos aquí.
+                    # Anthropic exige que el primer mensaje sea 'user', por eso anteponemos
+                    # un marcador mínimo antes del saludo del asistente.
+                    if not session.conversation_history:
+                        from app.services.prompt_service import get_welcome_greeting
+                        _seed_greeting = get_welcome_greeting(
+                            session.script, session._customer_snapshot
+                        )
+                        if _seed_greeting:
+                            session.conversation_history.append(
+                                {"role": "user", "content": "(El paciente acaba de contestar la llamada.)"}
+                            )
+                            session.add_assistant_message(_seed_greeting)
+                            logger.info(
+                                "Saludo de bienvenida sembrado en historial (call=%s): %s",
+                                session.call_sid, _seed_greeting[:80],
+                            )
                 # ─────────────────────────────────────────────────────────────
 
                 # ── Detección de ruido / entrada muy corta ──────────────────

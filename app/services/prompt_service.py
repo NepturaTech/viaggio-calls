@@ -347,16 +347,21 @@ def build_context_prompt(
 
     context += (
         "\n## Flujo exacto de apertura\n"
-        f"- Primera intervencion exacta: 'Hola, hablo con {call_name}?'\n"
-        "- No esperes en silencio a que el usuario diga 'alo'. Tu debes iniciar hablando primero.\n"
-        f"- Si la persona responde algo ambiguo como 'alo', 'si', 'quien habla', 'de parte de quien' o similar, todavia no asumas que ya confirmo identidad.\n"
-        f"- Si preguntan 'de parte de quien' o 'quien habla', responde: 'Hola, mucho gusto, te habla Andrea. Me comunico de parte del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
-        f"- Si la persona responde de forma ambigua como 'alo' o no se entiende, repite solo la confirmacion de identidad: 'Hola, hablo con {call_name}?'\n"
-        f"- Si la persona confirma claramente con frases como 'si', 'si con el', 'soy yo', 'con el habla' o equivalente, no vuelvas a preguntar '¿Hablo con {call_name}?'.\n"
-        f"- Cuando ya quede confirmada la identidad, tu siguiente respuesta debe incluir presentacion, hospital y proyecto antes de cualquier otra pregunta.\n"
-        f"- Usa una frase como: 'Que bueno, {call_name}. Mucho gusto, te habla Andrea. Me comunico de parte del {hospital_label} por el {project_name}. Te llamo para {_call_open_reason}. {_call_open_q}'\n"
-        "- No omitas 'te habla Andrea' ni el nombre del hospital en esa primera respuesta despues de la confirmacion.\n"
-        "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma primera respuesta salvo que la identidad ya este confirmada.\n"
+        "- IMPORTANTE: el saludo de bienvenida YA fue reproducido al inicio de la llamada "
+        "(aparece como tu primer turno en el historial). "
+        f"Ese saludo ya dijo tu nombre (Andrea), ya menciono el {hospital_label} y el {project_name}, "
+        f"y ya pregunto si hablas con {call_name}. "
+        "Por lo tanto NO vuelvas a saludar, NO repitas 'te habla Andrea' ni el nombre del hospital o del proyecto, "
+        "y NUNCA inicies tu respuesta con 'Hola, hablo con...'.\n"
+        f"- Si la persona confirma su identidad ('si', 'si con ella', 'soy yo', 'con ella habla' o equivalente), "
+        f"NO vuelvas a confirmar ni a presentarte: continua directo con el motivo. "
+        f"Usa una frase breve como: 'Que bueno, {call_name}. Te llamo para {_call_open_reason}. {_call_open_q}'\n"
+        f"- Si la persona responde algo ambiguo o muy corto ('alo', 'si?', 'quien es') sin confirmar con claridad, "
+        f"aclara UNA sola vez de forma breve: 'Te habla Andrea, del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
+        f"- Si preguntan 'de parte de quien' o 'quien habla', responde breve: "
+        f"'Te habla Andrea, del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
+        "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma respuesta "
+        "salvo que la identidad ya este confirmada.\n"
     )
 
     # --- Huella Delfos: visita de campo ---
