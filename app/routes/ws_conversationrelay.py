@@ -6,7 +6,7 @@ import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.db.repositories import CallRepository, pop_pending_call_params, mark_human_turn
+from app.db.repositories import CallRepository, pop_pending_call_params, mark_human_turn, get_call_patient
 from app.services.call_log_service import (
     append_transcript_line,
     finalize_call,
@@ -173,6 +173,42 @@ def _load_call_record(call_sid: str) -> tuple[dict | None, int | None]:
 
 def _load_session_context(session: ConversationSession):
     customer, appointments = get_customer_context(session.customer_phone or "")
+
+    # ── Prioridad del registry (nombre realmente hablado) ────────────────────
+    # El registry (poblado en /voice) tiene el nombre/hospital/proyecto que el
+    # frontend pidió llamar y que Twilio YA dijo por voz en el welcome_greeting.
+    # El lookup por teléfono puede devolver un registro distinto/desfasado del
+    # dataset Viaggio (p. ej. un registro de prueba que pisa al paciente real),
+    # haciendo que el saludo hablado y el contexto del modelo diverjan
+    # ("cambió el nombre a mitad de llamada"). Por eso el registry manda.
+    registry = get_call_patient(session.call_sid) if session.call_sid else None
+    reg_name = (registry.get("patient_name") or "").strip() if registry else ""
+    if reg_name:
+        if customer:
+            old_name = (customer.get("full_name") or "").strip()
+            if old_name and old_name != reg_name:
+                logger.info(
+                    "Nombre del registry '%s' tiene prioridad sobre el lookup por teléfono '%s' (call=%s)",
+                    reg_name, old_name, session.call_sid,
+                )
+            customer["full_name"] = reg_name
+            # hospital/proyecto también se hablaron desde el registry: preferirlos si existen
+            if registry.get("hospital_name"):
+                customer["hospital_name"] = registry["hospital_name"]
+            if registry.get("project_name"):
+                customer["project_name"] = registry["project_name"]
+        else:
+            # Sin match por teléfono → construir el paciente desde el registry.
+            customer = {
+                "full_name": reg_name,
+                "document_number": registry.get("patient_id") or None,
+                "phone_number": session.customer_phone,
+                "hospital_name": registry.get("hospital_name") or None,
+                "project_name": registry.get("project_name") or None,
+                "source": "registry",
+            }
+            appointments = []
+            logger.info("=== PACIENTE (desde registry) === nombre=%s", reg_name)
 
     # Si el paciente no está en la BD pero se construyó desde query params en /voice,
     # recuperarlo desde la caché de corta duración (se elimina al leerlo).
