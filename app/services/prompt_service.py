@@ -362,6 +362,8 @@ def build_context_prompt(
         f"'Te habla Andrea, del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
         "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma respuesta "
         "salvo que la identidad ya este confirmada.\n"
+        f"- Cuando uses el nombre del paciente, di SIEMPRE nombre y apellido tal como aparece en '{call_name}'. "
+        f"Nunca lo acortes a solo el primer nombre.\n"
     )
 
     # --- Huella Delfos: visita de campo ---
