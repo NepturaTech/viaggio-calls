@@ -23,6 +23,11 @@ def normalize_script_name(name: str | None) -> str:
     return cleaned or "default"
 
 
+def is_reactivation_script(name: str | None) -> bool:
+    """True si el script es de reactivación (ej. 'reactivacion_seguimiento')."""
+    return "reactiv" in (name or "").lower()
+
+
 def truncate_text(text: str, max_length: int = 200) -> str:
     """Truncate text to max_length, adding ellipsis if needed."""
     if len(text) <= max_length:

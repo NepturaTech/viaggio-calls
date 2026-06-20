@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     # ManyChat — automatización cuando no se contesta la llamada
     manychat_api_key: str = ""
     manychat_no_answer_flow_ns: str = ""   # Flow NS del flow a disparar
+    # Flow a disparar al terminar una llamada de reactivación (override por env)
+    manychat_reactivation_flow_ns: str = "content20260620113511_304633"
 
     # Audio storage
     audio_storage_enabled: bool = False

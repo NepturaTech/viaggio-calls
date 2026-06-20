@@ -155,38 +155,37 @@ def _send_flow(subscriber_id: str, flow_ns: str) -> bool:
         return False
 
 
-async def trigger_no_answer_flow(
+async def _dispatch_flow(
+    flow_ns: str,
     phone: str,
-    reason: str = "no_answer",
+    reason: str,
     manychat_user_id: str | None = None,
     call_purpose: str | None = None,
 ) -> bool:
-    """Disparar el flow de ManyChat configurado para llamadas no contestadas.
+    """Resuelve el suscriptor, setea el propósito y dispara el flow indicado.
 
     Args:
+        flow_ns:          Flow NS de ManyChat a disparar.
         phone:            Teléfono del paciente en formato E.164 (ej. +573209085770).
         reason:           Motivo del disparo — solo informativo para el log.
         manychat_user_id: subscriber_id de ManyChat leído directamente del dataset de Viaggio.
                           Si se provee, se usa directamente y se omite el lookup por teléfono.
         call_purpose:     Texto que describe para qué era la llamada — se guarda en el
-                          custom field {{cuf_14619329}} de ManyChat para que el agente sepa
-                          el contexto si el paciente devuelve la llamada.
+                          custom field {{cuf_14619329}} de ManyChat.
 
     Returns:
         True si el flow fue enviado exitosamente, False en cualquier otro caso.
     """
     import asyncio
 
-    settings = get_settings()
-    api_key = settings.manychat_api_key
-    flow_ns = settings.manychat_no_answer_flow_ns
+    api_key = get_settings().manychat_api_key
 
     if not api_key:
         logger.debug("ManyChat: MANYCHAT_API_KEY no configurada — omitiendo flow (%s)", reason)
         return False
 
     if not flow_ns:
-        logger.debug("ManyChat: MANYCHAT_NO_ANSWER_FLOW_NS no configurada — omitiendo flow (%s)", reason)
+        logger.debug("ManyChat: flow_ns vacío — omitiendo flow (%s)", reason)
         return False
 
     loop = asyncio.get_event_loop()
@@ -219,3 +218,34 @@ async def trigger_no_answer_flow(
         )
 
     return await loop.run_in_executor(None, _send_flow, subscriber_id, flow_ns)
+
+
+async def trigger_no_answer_flow(
+    phone: str,
+    reason: str = "no_answer",
+    manychat_user_id: str | None = None,
+    call_purpose: str | None = None,
+) -> bool:
+    """Flow de ManyChat para llamadas no contestadas (MANYCHAT_NO_ANSWER_FLOW_NS)."""
+    return await _dispatch_flow(
+        get_settings().manychat_no_answer_flow_ns,
+        phone,
+        reason,
+        manychat_user_id=manychat_user_id,
+        call_purpose=call_purpose,
+    )
+
+
+async def trigger_reactivation_flow(
+    phone: str,
+    manychat_user_id: str | None = None,
+    call_purpose: str | None = None,
+) -> bool:
+    """Flow de ManyChat al terminar una llamada de reactivación (MANYCHAT_REACTIVATION_FLOW_NS)."""
+    return await _dispatch_flow(
+        get_settings().manychat_reactivation_flow_ns,
+        phone,
+        "reactivation",
+        manychat_user_id=manychat_user_id,
+        call_purpose=call_purpose,
+    )

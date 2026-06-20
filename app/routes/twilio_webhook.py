@@ -42,7 +42,8 @@ def _build_call_purpose(registry: dict | None) -> str:
     except Exception:
         pass
     return script_name or "Llamada de seguimiento"
-from app.services.manychat_service import trigger_no_answer_flow
+from app.services.manychat_service import trigger_no_answer_flow, trigger_reactivation_flow
+from app.utils.normalization import is_reactivation_script
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -228,6 +229,29 @@ async def handle_call_status(
                 )
             else:
                 logger.info("ManyChat no-answer flow: sin teléfono ni manychat_user_id para sid=%s", CallSid)
+    elif normalized == "completed":
+        # Llamada contestada y finalizada. Si era de reactivación, disparar el
+        # flow de seguimiento de ManyChat para que le llegue un mensaje al paciente.
+        registry = get_call_patient(CallSid)
+        script_name = (registry or {}).get("script_name", "")
+        if is_reactivation_script(script_name):
+            phone = (registry or {}).get("patient_phone", "")
+            manychat_user_id = (registry or {}).get("manychat_user_id", "")
+            if phone or manychat_user_id:
+                call_purpose = _build_call_purpose(registry)
+                logger.info(
+                    "ManyChat reactivation flow: disparando para phone=%s manychat_user_id=%s script=%s sid=%s",
+                    phone, manychat_user_id, script_name, CallSid,
+                )
+                asyncio.create_task(
+                    trigger_reactivation_flow(
+                        phone,
+                        manychat_user_id=manychat_user_id or None,
+                        call_purpose=call_purpose,
+                    )
+                )
+            else:
+                logger.info("ManyChat reactivation flow: sin teléfono ni manychat_user_id para sid=%s", CallSid)
     return {"status": "received"}
 
 

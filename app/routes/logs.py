@@ -8,6 +8,8 @@ import logging
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from app.utils.logging import LOG_FILE
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["logs"])
@@ -406,26 +408,37 @@ async def log_viewer():
 
 @router.get("/logs/stream", include_in_schema=False)
 async def stream_logs():
-    """SSE endpoint — emite líneas de journalctl en tiempo real."""
+    """SSE endpoint — sigue logs/logs.txt en tiempo real (tail -f)."""
 
     async def generate():
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "journalctl", "-u", "delfos",
-                "-f",                 # follow
-                "--output=cat",       # solo el mensaje, sin metadatos de journald
-                "-n", "80",           # últimas 80 líneas al conectar
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            async for line in proc.stdout:
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    # Escapar datos para SSE (los saltos de línea rompen el protocolo)
-                    safe = text.replace("\n", "↵")
-                    yield f"data: {safe}\n\n"
+            while not LOG_FILE.exists():
+                yield "data: [esperando logs/logs.txt…]\n\n"
+                await asyncio.sleep(1)
+            f = LOG_FILE.open("r", encoding="utf-8", errors="replace")
+            try:
+                # Últimas 80 líneas al conectar, luego seguir
+                for line in f.readlines()[-80:]:
+                    text = line.rstrip()
+                    if text:
+                        yield f"data: {text}\n\n"
+                f.seek(0, 2)
+                while True:
+                    line = f.readline()
+                    if line:
+                        text = line.rstrip()
+                        if text:
+                            yield f"data: {text}\n\n"
+                    else:
+                        await asyncio.sleep(0.5)
+                        # Detectar rotación (RotatingFileHandler): el archivo se truncó
+                        if LOG_FILE.exists() and LOG_FILE.stat().st_size < f.tell():
+                            f.close()
+                            f = LOG_FILE.open("r", encoding="utf-8", errors="replace")
+            finally:
+                f.close()
         except Exception as exc:
-            yield f"data: [ERROR al leer journalctl: {exc}]\n\n"
+            yield f"data: [ERROR al leer logs.txt: {exc}]\n\n"
 
     return StreamingResponse(
         generate(),
