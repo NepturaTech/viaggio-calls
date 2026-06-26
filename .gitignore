@@ -30,3 +30,11 @@ lovable*.md
 dist/
 build/
 coverage/
+
+# Artefactos locales (dumps de logs, reportes, scripts de análisis) — no van al deploy
+[Ee]rrores.txt
+*.xlsx
+*.docx
+Viaggio*.yml
+add_*.py
+build_platform_comparison.py
