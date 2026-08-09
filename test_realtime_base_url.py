@@ -18,7 +18,13 @@ def demo() -> None:
         == "wss://calls.neptura.tech/ws/realtime-media"
     )
 
-    for malo in ("", None, "https://boulder-too-sauce-upper.trycloudflare.com"):
+    # trycloudflare pasa (es el ingress real de la VM hoy), solo con warning
+    assert (
+        _realtime_ws_url("https://boulder-too-sauce-upper.trycloudflare.com")
+        == "wss://boulder-too-sauce-upper.trycloudflare.com/ws/realtime-media"
+    )
+
+    for malo in ("", None):
         try:
             _realtime_ws_url(malo)
         except ValueError:

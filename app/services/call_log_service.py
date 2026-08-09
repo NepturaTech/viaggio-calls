@@ -207,6 +207,16 @@ def get_call_with_events(call_sid: str) -> dict | None:
 _not_answered_sids: set[str] = set()
 
 
+def was_call_not_answered(call_sid: str) -> bool:
+    """True si la llamada ya fue marcada voicemail/no-answer/busy/failed.
+
+    El status 'completed' de Twilio llega igual para llamadas colgadas por AMD;
+    sin este check, el flow de reactivación de ManyChat se dispararía encima
+    del flow de buzón (doble mensaje al paciente por la misma llamada).
+    """
+    return call_sid in _not_answered_sids
+
+
 def mark_call_not_answered(
     call_sid: str,
     status: str,

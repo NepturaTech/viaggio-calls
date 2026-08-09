@@ -121,15 +121,25 @@ def generate_conversation_relay_twiml(
 def _realtime_ws_url(base_url: str) -> str:
     """Derive the wss:// URL Twilio must reach for the Realtime media stream.
 
-    Raises if BASE_URL no sirve para produccion: el caller (twilio_webhook)
-    ya captura la excepcion y cae a ConversationRelay. Sin este guard el TwiML
-    sale valido apuntando a un host muerto y la llamada queda MUDA, sin fallback.
+    Raises solo si BASE_URL esta vacio: el caller (twilio_webhook) captura la
+    excepcion y cae a ConversationRelay. Sin este guard el TwiML sale valido
+    apuntando a la nada y la llamada queda MUDA, sin fallback.
+
+    Un tunel trycloudflare pasa con WARNING: es el ingress real de la VM hoy
+    (los webhooks de Twilio ya entran por ahi), pero la URL cambia si
+    cloudflared se reinicia — migrar a dominio estable cuando se pueda.
     """
     host = (base_url or "").replace("https://", "").replace("http://", "").strip("/")
-    if not host or "trycloudflare.com" in host:
+    if not host:
         raise ValueError(
-            f"BASE_URL invalido para Realtime ({host or 'vacio'!r}): Twilio no puede "
-            "alcanzar un tunel de dev efimero. Se cae a ConversationRelay."
+            "BASE_URL vacio: Twilio no tiene adonde conectar el media stream. "
+            "Se cae a ConversationRelay."
+        )
+    if "trycloudflare.com" in host:
+        logger.warning(
+            "BASE_URL es un tunel quick de Cloudflare (%s): funciona, pero la URL "
+            "cambia si cloudflared se reinicia — usar dominio estable en prod.",
+            host,
         )
     return f"wss://{host}/ws/realtime-media"
 

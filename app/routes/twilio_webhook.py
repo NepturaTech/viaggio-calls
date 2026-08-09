@@ -11,7 +11,7 @@ from app.services.twilio_service import (
     make_outbound_call,
 )
 from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken, record_call_attempt, is_in_cooldown
-from app.services.call_log_service import create_call_record, mark_call_not_answered
+from app.services.call_log_service import create_call_record, mark_call_not_answered, was_call_not_answered
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
 from app.services.audio_archive_service import delete_call_archive, store_twilio_recording
@@ -234,7 +234,14 @@ async def handle_call_status(
         # flow de seguimiento de ManyChat para que le llegue un mensaje al paciente.
         registry = get_call_patient(CallSid)
         script_name = (registry or {}).get("script_name", "")
-        if is_reactivation_script(script_name):
+        if was_call_not_answered(CallSid):
+            # Colgada por AMD (buzón) o no contestada: el flow de no-answer ya
+            # se disparó; no mandar TAMBIÉN el de reactivación al paciente.
+            logger.info(
+                "ManyChat reactivation flow: omitido, la llamada %s fue voicemail/no-answer",
+                CallSid,
+            )
+        elif is_reactivation_script(script_name):
             phone = (registry or {}).get("patient_phone", "")
             manychat_user_id = (registry or {}).get("manychat_user_id", "")
             if phone or manychat_user_id:
