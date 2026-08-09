@@ -147,6 +147,20 @@ def _should_end_call(text: str) -> bool:
     return bool(text and FAREWELL_PATTERN.search(text))
 
 
+# Despedidas dichas POR ANDREA. Mas estricto que FAREWELL_PATTERN: el modelo
+# usa "buenas tardes"/"igualmente" en medio de la conversacion sin despedirse.
+MODEL_FAREWELL_PATTERN = re.compile(
+    r"\b(adi[oó]s|hasta luego|hasta pronto|chao|cu[ií]date"
+    r"|que\s+(?:tengas?|pases?)\s+(?:un\s+|una\s+)?(?:buen|buena|feliz|excelente)"
+    r"|que\s+est[eé]s?\s+(?:muy\s+)?bien|que\s+te\s+vaya\s+(?:muy\s+)?bien)\b",
+    re.IGNORECASE,
+)
+
+
+def _model_says_farewell(text: str) -> bool:
+    return bool(text and MODEL_FAREWELL_PATTERN.search(text))
+
+
 def _is_voicemail(text: str) -> bool:
     return bool(text and VOICEMAIL_PATTERN.search(text))
 
@@ -654,7 +668,18 @@ async def conversation_relay_ws(websocket: WebSocket):
                 if archive is not None:
                     archive.append_transcript("assistant", ai_response)
 
-                if session.pending_hangup:
+                if not session.pending_hangup and _model_says_farewell(ai_response):
+                    # Andrea se despidio (el usuario dijo p.ej. solo "gracias"):
+                    # colgar tras dejar que el TTS termine de decir la despedida.
+                    # ponytail: delay estimado por longitud (~13 chars/s de habla);
+                    # si corta despedidas largas, medir con una llamada real.
+                    session.pending_hangup = True
+                    await _hangup_after_response(
+                        session.call_sid,
+                        delay=min(8.0, 1.0 + len(ai_response) / 13),
+                        reason="model_farewell",
+                    )
+                elif session.pending_hangup:
                     await _hangup_after_response(session.call_sid)
 
             elif event_type == "interrupt":
@@ -845,6 +870,13 @@ async def realtime_media_ws(websocket: WebSocket):
                     if not session.initial_greeting_completed:
                         session.initial_greeting_completed = True
                     session.add_assistant_message(transcript)
+                    if not session.pending_hangup and _model_says_farewell(transcript):
+                        # Andrea se despidio: colgar al terminar esta respuesta.
+                        # OpenAI manda el audio mas rapido que el playback del
+                        # telefono -> dar tiempo extra segun largo de la frase.
+                        session.pending_hangup = True
+                        session.hangup_delay = min(8.0, 1.0 + len(transcript) / 13)
+                        logger.info("Model farewell detected; hanging up after this response")
                     if session.call_id:
                         log_call_event(session.call_id, "ai_response", {"text": transcript})
                         append_transcript_line(session.call_id, "assistant", transcript)
@@ -876,7 +908,10 @@ async def realtime_media_ws(websocket: WebSocket):
                 logger.info("OpenAI completed a realtime response")
                 if session.pending_hangup:
                     session.pending_hangup = False
-                    await _hangup_after_response(session.call_sid)
+                    await _hangup_after_response(
+                        session.call_sid,
+                        delay=getattr(session, "hangup_delay", 1.2),
+                    )
 
             elif event_type == "input_audio_buffer.speech_started" and stream_sid:
                 if not session.initial_greeting_completed:
