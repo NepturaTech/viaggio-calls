@@ -118,6 +118,22 @@ def generate_conversation_relay_twiml(
     return str(response)
 
 
+def _realtime_ws_url(base_url: str) -> str:
+    """Derive the wss:// URL Twilio must reach for the Realtime media stream.
+
+    Raises if BASE_URL no sirve para produccion: el caller (twilio_webhook)
+    ya captura la excepcion y cae a ConversationRelay. Sin este guard el TwiML
+    sale valido apuntando a un host muerto y la llamada queda MUDA, sin fallback.
+    """
+    host = (base_url or "").replace("https://", "").replace("http://", "").strip("/")
+    if not host or "trycloudflare.com" in host:
+        raise ValueError(
+            f"BASE_URL invalido para Realtime ({host or 'vacio'!r}): Twilio no puede "
+            "alcanzar un tunel de dev efimero. Se cae a ConversationRelay."
+        )
+    return f"wss://{host}/ws/realtime-media"
+
+
 def generate_realtime_stream_twiml(
     customer_phone: str,
     customer_name: str | None,
@@ -128,9 +144,7 @@ def generate_realtime_stream_twiml(
     """Generate TwiML that connects the call to a bidirectional media stream."""
     response = VoiceResponse()
     connect = response.connect()
-    stream = connect.stream(
-        url=f"wss://{settings.base_url.replace('https://', '').replace('http://', '')}/ws/realtime-media"
-    )
+    stream = connect.stream(url=_realtime_ws_url(settings.base_url))
     stream.parameter(name="customer_phone", value=customer_phone or "")
     stream.parameter(name="customer_name", value=customer_name or "")
     stream.parameter(name="direction", value=direction)

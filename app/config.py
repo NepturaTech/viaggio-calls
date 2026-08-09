@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o"
     openai_realtime_model: str = "gpt-realtime"
     openai_realtime_voice: str = "alloy"
+    # Silencio (ms) que espera el VAD antes de que Andrea responda. Knob de
+    # calibracion: subir si corta a pacientes que hablan pausado.
+    openai_realtime_silence_ms: int = 500
     openai_realtime_speaking_style: str = (
         "Habla en espanol latinoamericano neutro. "
         "Evita acento rioplatense, voseo y modismos argentinos. "

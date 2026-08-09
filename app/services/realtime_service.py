@@ -48,7 +48,11 @@ async def connect_realtime(instructions: str):
                 "type": "server_vad",
                 "threshold": 0.7,
                 "prefix_padding_ms": 400,
-                "silence_duration_ms": 1000,
+                # Calibracion: cuanto silencio espera Andrea antes de responder.
+                # 1000 ms se sentia lento; 500 ms es mas natural pero puede cortar
+                # a quien habla pausado (adultos mayores). Ajustable por .env
+                # (OPENAI_REALTIME_SILENCE_MS) para afinar sin redeploy.
+                "silence_duration_ms": settings.openai_realtime_silence_ms,
                 "create_response": True,
                 "interrupt_response": True,
             },
