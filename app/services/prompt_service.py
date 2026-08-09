@@ -207,13 +207,24 @@ def build_context_prompt(
         or "proyecto de diabetes mellitus tipo 2"
     )
     context += f"\n## Institución de esta llamada\n"
-    if _hospital:
-        context += f"- Hospital: {_hospital}\n"
-        context += f"- Al presentarte, di EXACTAMENTE: 'me comunico de parte del {_hospital}'.\n"
-        context += f"- NUNCA uses 'hospital correspondiente', 'hospital de referencia' ni ninguna frase genérica para el hospital. Usa SIEMPRE '{_hospital}'.\n"
-    else:
-        context += f"- Hospital: no disponible en el contexto actual. Di 'me comunico de parte del hospital del proyecto' si debes mencionarlo.\n"
     context += f"- Proyecto: {_project}\n"
+    if _hospital:
+        context += f"- Hospital aliado: {_hospital}\n"
+        context += (
+            f"- Cuando la persona confirme que es ella, preséntate EXACTAMENTE así: "
+            f"'Te habla Andrea, del {_project}, que realizamos junto con el {_hospital}'.\n"
+        )
+    else:
+        context += (
+            f"- Hospital aliado: no disponible. Cuando la persona confirme que es ella, "
+            f"preséntate EXACTAMENTE así: 'Te habla Andrea, del {_project}'. NO menciones ningún hospital.\n"
+        )
+    context += (
+        "- La llamada es DEL PROYECTO, junto con el hospital; NUNCA digas 'de parte del hospital', "
+        "'del hospital de referencia' ni frases que hagan parecer que llamas directamente del hospital.\n"
+        "- El saludo inicial solo pregunta por la persona. Preséntate en tu PRIMER turno, "
+        "después de que confirme, y recién ahí explica el motivo de la llamada.\n"
+    )
 
     if appointments:
         context += "\n## Citas proximas\n"
