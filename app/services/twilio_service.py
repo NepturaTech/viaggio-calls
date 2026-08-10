@@ -152,6 +152,10 @@ def generate_realtime_stream_twiml(
     welcome_greeting: str | None = None,
 ) -> str:
     """Generate TwiML that connects the call to a bidirectional media stream."""
+    # Igual que el path ConversationRelay: anteponer el aviso legal de grabacion
+    # al saludo para que Andrea lo diga (request_initial_greeting exige el saludo exacto).
+    if settings.twilio_recording_enabled:
+        welcome_greeting = _build_recording_announcement(welcome_greeting)
     response = VoiceResponse()
     connect = response.connect()
     stream = connect.stream(url=_realtime_ws_url(settings.base_url))
