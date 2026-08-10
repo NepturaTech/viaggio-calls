@@ -19,9 +19,9 @@ async def connect_realtime(instructions: str):
     if not settings.openai_api_key:
         raise ValueError("OpenAI API key is not configured for realtime voice mode")
 
+    # Sin header OpenAI-Beta: la forma beta fue deshabilitada (beta_api_shape_disabled)
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
-        "OpenAI-Beta": "realtime=v1",
     }
 
     ws = await websockets.connect(
@@ -32,29 +32,38 @@ async def connect_realtime(instructions: str):
         close_timeout=10,
     )
 
+    # Forma GA de la API Realtime (la beta fue deshabilitada): session.type=realtime,
+    # audio.input/output.format en vez de input_audio_format, audio/pcmu = g711_ulaw.
     session_update = {
         "type": "session.update",
         "session": {
+            "type": "realtime",
+            "output_modalities": ["audio"],
             "instructions": f"{instructions}\n\n## Voz y estilo oral\n{settings.openai_realtime_speaking_style}",
-            "modalities": ["audio", "text"],
-            "voice": settings.openai_realtime_voice,
-            "input_audio_format": "g711_ulaw",
-            "output_audio_format": "g711_ulaw",
-            "input_audio_transcription": {
-                "model": "gpt-4o-mini-transcribe",
-                "language": "es",
-            },
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.7,
-                "prefix_padding_ms": 400,
-                # Calibracion: cuanto silencio espera Andrea antes de responder.
-                # 1000 ms se sentia lento; 500 ms es mas natural pero puede cortar
-                # a quien habla pausado (adultos mayores). Ajustable por .env
-                # (OPENAI_REALTIME_SILENCE_MS) para afinar sin redeploy.
-                "silence_duration_ms": settings.openai_realtime_silence_ms,
-                "create_response": True,
-                "interrupt_response": True,
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "transcription": {
+                        "model": "gpt-4o-mini-transcribe",
+                        "language": "es",
+                    },
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.7,
+                        "prefix_padding_ms": 400,
+                        # Calibracion: cuanto silencio espera Andrea antes de responder.
+                        # 1000 ms se sentia lento; 500 ms es mas natural pero puede cortar
+                        # a quien habla pausado (adultos mayores). Ajustable por .env
+                        # (OPENAI_REALTIME_SILENCE_MS) para afinar sin redeploy.
+                        "silence_duration_ms": settings.openai_realtime_silence_ms,
+                        "create_response": True,
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcmu"},
+                    "voice": settings.openai_realtime_voice,
+                },
             },
         },
     }
@@ -87,7 +96,6 @@ async def request_initial_greeting(ws, greeting: str):
     event = {
         "type": "response.create",
         "response": {
-            "modalities": ["audio", "text"],
             "instructions": (
                 "Abre la llamada en espanol, con tono calido y natural. "
                 f"{settings.openai_realtime_speaking_style} "
