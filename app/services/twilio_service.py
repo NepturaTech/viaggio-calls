@@ -107,11 +107,13 @@ def generate_conversation_relay_twiml(
         relay_kwargs["voice"] = tts_voice
 
     logger.info(
-        "Generating ConversationRelay TwiML: provider=%s voice=%s language=%s speech_model=%s",
+        "Generating ConversationRelay TwiML: provider=%s voice=%s language=%s "
+        "speech_model=%s transcription_provider=%s",
         tts_provider,
         tts_voice,
         language,
         speech_model,
+        transcription_provider,
     )
     connect.conversation_relay(**relay_kwargs)
     response.append(connect)
