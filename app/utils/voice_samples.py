@@ -39,7 +39,9 @@ async def sample_voice(voice: str) -> bool:
                 "session": {
                     "type": "realtime",
                     "output_modalities": ["audio"],
-                    "instructions": "Lees textos en espanol colombiano, con tono calido y natural.",
+                    # El MISMO estilo que se aplica en llamadas reales, para que la
+                    # muestra suene igual que Andrea en produccion.
+                    "instructions": settings.openai_realtime_speaking_style,
                     "audio": {
                         # pcm16 24 kHz: calidad completa para comparar voces
                         "input": {"format": {"type": "audio/pcm", "rate": 24000}},

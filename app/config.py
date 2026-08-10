@@ -97,10 +97,13 @@ class Settings(BaseSettings):
     # con muletillas/ruido, algo mas de latencia). Cambiar por .env sin deploy.
     openai_realtime_turn_detection: str = "server_vad"
     openai_realtime_speaking_style: str = (
-        "Habla en espanol latinoamericano neutro. "
-        "Evita acento rioplatense, voseo y modismos argentinos. "
+        "Habla con acento COLOMBIANO (bogotano/andino): entonacion suave y melodica, "
+        "seseo latinoamericano, tuteo respetuoso. "
+        "PROHIBIDO el acento de Espana: nada de zeta/ce castellana (di 'gracias' como 'grasias', "
+        "no 'grathias'), nada de vosotros. "
+        "Evita tambien acento rioplatense, voseo, modismos argentinos y acento mexicano marcado. "
         "No prolongues demasiado las vocales ni uses una entonacion cantada. "
-        "Prefiere un tono claro, calido y natural, cercano a servicio telefonico en Colombia. "
+        "Tono claro, calido y natural, como una asistente telefonica de salud en Colombia. "
         "Habla con pausas breves, seguridad y ritmo conversacional."
     )
     ffmpeg_path: str = ""
