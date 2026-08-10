@@ -279,48 +279,74 @@ async def handle_answering_machine_detection(
 
     import asyncio
 
+    def _voicemail_hangup() -> None:
+        hangup_call(CallSid)
+        delete_call_archive(CallSid)
+        logger.info("Call %s colgada por voicemail AMD (%s)", CallSid, answered_by)
+        registry = get_call_patient(CallSid)
+        # Persistir en Supabase que contestó el buzón, no el paciente
+        mark_call_not_answered(CallSid, "voicemail", registry=registry)
+        # Disparar flow de ManyChat para buzón de voz
+        phone = (registry or {}).get("patient_phone", "")
+        manychat_user_id = (registry or {}).get("manychat_user_id", "")
+        if phone or manychat_user_id:
+            call_purpose = _build_call_purpose(registry)
+            logger.info(
+                "ManyChat voicemail flow: disparando para phone=%s manychat_user_id=%s purpose='%s' sid=%s",
+                phone, manychat_user_id, call_purpose, CallSid,
+            )
+            asyncio.create_task(
+                trigger_no_answer_flow(
+                    phone,
+                    reason="voicemail",
+                    manychat_user_id=manychat_user_id or None,
+                    call_purpose=call_purpose,
+                )
+            )
+
     # Casos definitivos de buzón de voz — colgar siempre:
     #   machine_end_beep    → contestador con beep (buzón seguro)
     #   machine_end_silence → contestador sin beep (mensaje grabado corto)
     #   fax                 → señal de fax
-    #
-    # machine_start: puede ser falso positivo cuando ElevenLabs habla primero
-    # (AMD confunde la voz sintetizada con una máquina). Solo colgamos si el
-    # humano AÚN NO ha hablado — si ya interactuó, ignoramos el resultado.
     definitive_voicemail = {"machine_end_beep", "machine_end_silence", "fax"}
 
-    # machine_start sin turno humano previo → probable buzón de voz real
-    if answered_by == "machine_start" and not human_has_spoken(CallSid):
-        logger.info(
-            "AMD machine_start sin turno humano — probable buzón. Colgando. sid=%s", CallSid
-        )
-        definitive_voicemail = definitive_voicemail | {"machine_start"}
+    # machine_start: el AMD puede decidir en <3s — ANTES de que el STT alcance a
+    # transcribir al humano (3 llamadas contestadas colgadas el 08-10) — así que
+    # "sin turno humano" a esta altura no prueba nada. Periodo de gracia: esperar
+    # unos segundos y colgar SOLO si sigue sin haber turno humano. Los buzones
+    # reales no marcan turno con voz... y si su saludo se transcribe, lo caza la
+    # detección por texto (_is_voicemail) del WebSocket.
+    if answered_by == "machine_start":
+        if human_has_spoken(CallSid):
+            logger.info("AMD machine_start ignorado: el humano ya habló. sid=%s", CallSid)
+            return {"status": "ignored", "answered_by": answered_by}
+
+        grace_s = 7  # ponytail: fijo; knob por .env solo si en campo hace falta
+
+        async def _grace_recheck():
+            await asyncio.sleep(grace_s)
+            if human_has_spoken(CallSid):
+                logger.info(
+                    "AMD machine_start descartado tras %ds de gracia: hubo turno humano. sid=%s",
+                    grace_s, CallSid,
+                )
+                return
+            logger.info(
+                "AMD machine_start confirmado tras %ds sin turno humano — buzón. Colgando. sid=%s",
+                grace_s, CallSid,
+            )
+            try:
+                _voicemail_hangup()
+            except Exception:
+                logger.exception("Fallo colgando buzón tras gracia AMD sid=%s", CallSid)
+
+        asyncio.create_task(_grace_recheck())
+        logger.info("AMD machine_start sin turno humano aún — gracia de %ds antes de colgar. sid=%s", grace_s, CallSid)
+        return {"status": "grace_period", "answered_by": answered_by}
 
     if answered_by in definitive_voicemail:
         try:
-            hangup_call(CallSid)
-            delete_call_archive(CallSid)
-            logger.info("Call %s colgada por voicemail AMD (%s)", CallSid, answered_by)
-            registry = get_call_patient(CallSid)
-            # Persistir en Supabase que contestó el buzón, no el paciente
-            mark_call_not_answered(CallSid, "voicemail", registry=registry)
-            # Disparar flow de ManyChat para buzón de voz
-            phone = (registry or {}).get("patient_phone", "")
-            manychat_user_id = (registry or {}).get("manychat_user_id", "")
-            if phone or manychat_user_id:
-                call_purpose = _build_call_purpose(registry)
-                logger.info(
-                    "ManyChat voicemail flow: disparando para phone=%s manychat_user_id=%s purpose='%s' sid=%s",
-                    phone, manychat_user_id, call_purpose, CallSid,
-                )
-                asyncio.create_task(
-                    trigger_no_answer_flow(
-                        phone,
-                        reason="voicemail",
-                        manychat_user_id=manychat_user_id or None,
-                        call_purpose=call_purpose,
-                    )
-                )
+            _voicemail_hangup()
             return {"status": "hung_up", "answered_by": answered_by}
         except Exception:
             logger.exception("Failed to hang up voicemail call %s after AMD result %s", CallSid, answered_by)
