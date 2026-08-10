@@ -25,7 +25,11 @@ from app.services.report_service import send_whatsapp_report
 from app.services.prompt_service import build_context_prompt
 from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
-from app.services.realtime_service import connect_realtime, request_initial_greeting
+from app.services.realtime_service import (
+    connect_realtime,
+    request_initial_greeting,
+    update_session_instructions,
+)
 from app.services.supabase_rest_service import get_active_call_script, get_huella_visit_context, get_patient_dataset_context
 from app.services.twilio_service import hangup_call, start_call_recording
 
@@ -768,14 +772,49 @@ async def realtime_media_ws(websocket: WebSocket):
                 session.customer_name = custom_parameters.get("customer_name", "")
                 session.direction = custom_parameters.get("direction", "")
                 session.script_name = (custom_parameters.get("script_name", "default") or "default").strip()
-                _load_session_context(session)
+                # Saludo PRIMERO, contexto DESPUÉS. _load_session_context hace
+                # fetches HTTP lentos a Viaggio/Huella (36 s vistos en prod
+                # 08-10 17:33): si se espera aquí, el paciente contesta y oye
+                # silencio. Igual que el path CR: cargar en background y mandar
+                # las instructions completas via session.update al terminar.
+                registry = get_call_patient(call_sid) or {}
+                session.patient_id = str(registry.get("patient_id") or "").strip() or None
                 archive = CallAudioArchive(
                     call_sid,
                     session.customer_name,
                     session.patient_id,
                     session.script_name,
                 )
-                openai_ws = await connect_realtime(session.system_prompt)
+                openai_ws = await connect_realtime(
+                    "Eres Andrea, una asistente telefonica automatizada de "
+                    "seguimiento de salud. Eres mujer: usa siempre genero "
+                    "femenino. El contexto del paciente aun esta cargando: di "
+                    "unicamente el saludo indicado y, si la persona responde "
+                    "antes de recibir mas contexto, continua breve, calida y "
+                    "natural SIN inventar datos del paciente ni del proyecto."
+                )
+
+                async def _push_full_context():
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, _load_session_context, session
+                        )
+                        if archive is not None and session.patient_id:
+                            archive.patient_id = session.patient_id
+                        if openai_ws is not None:
+                            await update_session_instructions(openai_ws, session.system_prompt)
+                            logger.info(
+                                "Contexto completo enviado a Realtime (call=%s, chars=%d)",
+                                call_sid, len(session.system_prompt or ""),
+                            )
+                    except Exception:
+                        logger.error(
+                            "Fallo cargando/enviando contexto completo (call=%s) — "
+                            "la llamada sigue con el prompt base",
+                            call_sid, exc_info=True,
+                        )
+
+                asyncio.create_task(_push_full_context())
                 logger.info(
                     "Realtime custom parameters received: %s",
                     {

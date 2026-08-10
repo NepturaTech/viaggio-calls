@@ -77,6 +77,20 @@ async def connect_realtime(instructions: str):
     return ws
 
 
+async def update_session_instructions(ws, instructions: str):
+    """Replace the session instructions mid-call (GA partial session.update)."""
+    await ws.send(json.dumps({
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "instructions": (
+                f"{instructions}\n\n## Voz y estilo oral\n"
+                f"{settings.openai_realtime_speaking_style}"
+            ),
+        },
+    }))
+
+
 def describe_realtime_error(exc: Exception) -> str:
     """Return a user-friendly diagnostic for realtime connection failures."""
     if isinstance(exc, AsyncTimeoutError):
