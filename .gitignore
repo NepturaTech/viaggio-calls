@@ -38,3 +38,4 @@ coverage/
 Viaggio*.yml
 add_*.py
 build_platform_comparison.py
+voice_samples/

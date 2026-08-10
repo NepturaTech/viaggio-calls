@@ -10,6 +10,30 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _turn_detection_config() -> dict:
+    """Turn detection calibrable por .env sin redeploy.
+
+    OPENAI_REALTIME_TURN_DETECTION=semantic_vad → decide fin de turno por
+    contenido (mejor con ruido/muletillas, +latencia). Default server_vad con
+    OPENAI_REALTIME_VAD_THRESHOLD (subirlo si el eco corta a Andrea) y
+    OPENAI_REALTIME_SILENCE_MS (subirlo si corta a quien habla pausado).
+    """
+    if settings.openai_realtime_turn_detection == "semantic_vad":
+        return {
+            "type": "semantic_vad",
+            "create_response": True,
+            "interrupt_response": True,
+        }
+    return {
+        "type": "server_vad",
+        "threshold": settings.openai_realtime_vad_threshold,
+        "prefix_padding_ms": 400,
+        "silence_duration_ms": settings.openai_realtime_silence_ms,
+        "create_response": True,
+        "interrupt_response": True,
+    }
+
+
 def get_realtime_ws_url() -> str:
     return f"wss://api.openai.com/v1/realtime?model={settings.openai_realtime_model}"
 
@@ -47,18 +71,7 @@ async def connect_realtime(instructions: str):
                         "model": "gpt-4o-mini-transcribe",
                         "language": "es",
                     },
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.7,
-                        "prefix_padding_ms": 400,
-                        # Calibracion: cuanto silencio espera Andrea antes de responder.
-                        # 1000 ms se sentia lento; 500 ms es mas natural pero puede cortar
-                        # a quien habla pausado (adultos mayores). Ajustable por .env
-                        # (OPENAI_REALTIME_SILENCE_MS) para afinar sin redeploy.
-                        "silence_duration_ms": settings.openai_realtime_silence_ms,
-                        "create_response": True,
-                        "interrupt_response": True,
-                    },
+                    "turn_detection": _turn_detection_config(),
                 },
                 "output": {
                     "format": {"type": "audio/pcmu"},

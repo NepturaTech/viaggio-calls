@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # Silencio (ms) que espera el VAD antes de que Andrea responda. Knob de
     # calibracion: subir si corta a pacientes que hablan pausado.
     openai_realtime_silence_ms: int = 500
+    # Umbral del VAD (0-1): mas alto = menos disparos por ruido/eco de linea.
+    # Llamadas 08-10: con 0.7 el eco en altavoz cortaba las frases de Andrea.
+    openai_realtime_vad_threshold: float = 0.85
+    # "server_vad" (por silencio) o "semantic_vad" (por contenido; mas natural
+    # con muletillas/ruido, algo mas de latencia). Cambiar por .env sin deploy.
+    openai_realtime_turn_detection: str = "server_vad"
     openai_realtime_speaking_style: str = (
         "Habla en espanol latinoamericano neutro. "
         "Evita acento rioplatense, voseo y modismos argentinos. "
