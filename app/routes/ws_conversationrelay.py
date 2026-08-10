@@ -893,6 +893,10 @@ async def realtime_media_ws(websocket: WebSocket):
                 transcript = event.get("transcript", "")
                 if transcript:
                     logger.info("User said: %s", transcript)
+                    # Igual que el path ConversationRelay (evento "prompt"): marcar
+                    # turno humano para que un machine_start tardio del AMD no cuelgue.
+                    if session.call_sid:
+                        mark_human_turn(session.call_sid)
                     session.add_user_message(transcript)
                     session.pending_hangup = _should_end_call(transcript)
                     if session.call_id:
