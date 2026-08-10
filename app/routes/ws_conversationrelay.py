@@ -25,6 +25,7 @@ from app.services.report_service import send_whatsapp_report
 from app.services.prompt_service import build_context_prompt
 from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
+from app.services.elevenlabs_tts_service import ElevenLabsSpeaker
 from app.services.realtime_service import (
     connect_realtime,
     request_initial_greeting,
@@ -735,8 +736,20 @@ async def realtime_media_ws(websocket: WebSocket):
     openai_ws = None
     archive: CallAudioArchive | None = None
     archive_finalized = False
+    # Hibrido: GPT Realtime en modo texto + ElevenLabs como voz (Andrea clonada).
+    _rt_settings = _get_settings()
+    eleven_mode = (
+        _rt_settings.realtime_tts_provider == "elevenlabs"
+        and bool(_rt_settings.elevenlabs_api_key)
+    )
+    if _rt_settings.realtime_tts_provider == "elevenlabs" and not eleven_mode:
+        logger.warning(
+            "REALTIME_TTS_PROVIDER=elevenlabs pero falta ELEVENLABS_API_KEY — "
+            "usando voz OpenAI como fallback"
+        )
 
-    logger.info("Realtime media WebSocket connected")
+    logger.info("Realtime media WebSocket connected (tts=%s)",
+                "elevenlabs" if eleven_mode else "openai")
 
     def finalize_archive_once():
         nonlocal archive_finalized, archive
@@ -794,7 +807,8 @@ async def realtime_media_ws(websocket: WebSocket):
                     "internos; si aun no sabes algo, lleva la conversacion con "
                     "preguntas generales (como se ha sentido) sin inventar "
                     "datos del paciente ni del proyecto. No te re-presentes ni "
-                    "repitas el saludo."
+                    "repitas el saludo.",
+                    text_only=eleven_mode,
                 )
 
                 async def _push_full_context():
@@ -879,12 +893,53 @@ async def realtime_media_ws(websocket: WebSocket):
         while openai_ws is None:
             await asyncio.sleep(0.05)
 
+        speaker: ElevenLabsSpeaker | None = None
+        eleven_text = ""
+
+        async def send_assistant_audio(payload_b64: str):
+            if archive is not None:
+                archive.append_assistant_audio(payload_b64)
+            if stream_sid:
+                await websocket.send_text(json.dumps({
+                    "event": "media",
+                    "streamSid": stream_sid,
+                    "media": {"payload": payload_b64},
+                }))
+
+        def register_assistant_turn(transcript: str):
+            logger.info("Assistant said: %s", transcript)
+            if not session.initial_greeting_completed:
+                session.initial_greeting_completed = True
+            session.add_assistant_message(transcript)
+            if not session.pending_hangup and _model_says_farewell(transcript):
+                # Andrea se despidio: colgar al terminar esta respuesta.
+                # El audio llega mas rapido que el playback del telefono
+                # -> dar tiempo extra segun largo de la frase.
+                session.pending_hangup = True
+                session.hangup_delay = min(8.0, 1.0 + len(transcript) / 13)
+                logger.info("Model farewell detected; hanging up after this response")
+            if session.call_id:
+                log_call_event(session.call_id, "ai_response", {"text": transcript})
+                append_transcript_line(session.call_id, "assistant", transcript)
+            if archive is not None:
+                archive.append_transcript("assistant", transcript)
+
         async for raw in openai_ws:
             event = json.loads(raw)
             event_type = event.get("type", "unknown")
 
             if event_type == "response.created":
                 logger.info("OpenAI started a realtime response")
+                if eleven_mode:
+                    if speaker is not None:
+                        await speaker.abort()
+                    eleven_text = ""
+                    speaker = ElevenLabsSpeaker(on_audio=send_assistant_audio)
+                    try:
+                        await speaker.start()
+                    except Exception as exc:
+                        logger.error("No se pudo abrir ElevenLabs TTS: %s", exc)
+                        speaker = None
 
             elif event_type in {"response.audio.delta", "response.output_audio.delta"} and stream_sid:
                 if archive is not None:
@@ -908,28 +963,19 @@ async def realtime_media_ws(websocket: WebSocket):
             }:
                 transcript = event.get("transcript", "")
                 if transcript:
-                    logger.info("Assistant said: %s", transcript)
-                    if not session.initial_greeting_completed:
-                        session.initial_greeting_completed = True
-                    session.add_assistant_message(transcript)
-                    if not session.pending_hangup and _model_says_farewell(transcript):
-                        # Andrea se despidio: colgar al terminar esta respuesta.
-                        # OpenAI manda el audio mas rapido que el playback del
-                        # telefono -> dar tiempo extra segun largo de la frase.
-                        session.pending_hangup = True
-                        session.hangup_delay = min(8.0, 1.0 + len(transcript) / 13)
-                        logger.info("Model farewell detected; hanging up after this response")
-                    if session.call_id:
-                        log_call_event(session.call_id, "ai_response", {"text": transcript})
-                        append_transcript_line(session.call_id, "assistant", transcript)
-                    if archive is not None:
-                        archive.append_transcript("assistant", transcript)
+                    register_assistant_turn(transcript)
 
             elif event_type in {"response.audio.done", "response.output_audio.done"}:
                 logger.debug("Assistant audio stream completed")
 
             elif event_type in {"response.text.delta", "response.output_text.delta"}:
-                logger.debug("Assistant text delta: %s", event.get("delta", ""))
+                delta = event.get("delta", "")
+                if eleven_mode and delta:
+                    eleven_text += delta
+                    if speaker is not None:
+                        await speaker.feed(delta)
+                else:
+                    logger.debug("Assistant text delta: %s", delta)
 
             elif event_type == "conversation.item.input_audio_transcription.completed":
                 transcript = event.get("transcript", "")
@@ -952,6 +998,14 @@ async def realtime_media_ws(websocket: WebSocket):
 
             elif event_type == "response.done":
                 logger.info("OpenAI completed a realtime response")
+                if eleven_mode:
+                    if speaker is not None:
+                        # Fin del texto; el audio restante sigue llegando en
+                        # background y el reader cierra solo con isFinal.
+                        await speaker.finish_input()
+                    if eleven_text.strip():
+                        register_assistant_turn(eleven_text.strip())
+                        eleven_text = ""
                 if session.pending_hangup:
                     session.pending_hangup = False
                     await _hangup_after_response(
@@ -963,6 +1017,10 @@ async def realtime_media_ws(websocket: WebSocket):
                 if not session.initial_greeting_completed:
                     logger.info("Caller speech detected during initial greeting; preserving greeting audio")
                     continue
+                if speaker is not None:
+                    # Barge-in: cortar tambien el audio pendiente de ElevenLabs
+                    await speaker.abort()
+                    speaker = None
                 await websocket.send_text(json.dumps({
                     "event": "clear",
                     "streamSid": stream_sid,
@@ -976,6 +1034,9 @@ async def realtime_media_ws(websocket: WebSocket):
 
             else:
                 logger.debug("Unhandled OpenAI realtime event: %s", event_type)
+
+        if speaker is not None:
+            await speaker.abort()
 
     try:
         await asyncio.gather(twilio_to_openai(), openai_to_twilio())

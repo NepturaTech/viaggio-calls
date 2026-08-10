@@ -38,8 +38,12 @@ def get_realtime_ws_url() -> str:
     return f"wss://api.openai.com/v1/realtime?model={settings.openai_realtime_model}"
 
 
-async def connect_realtime(instructions: str):
-    """Open a Realtime API WebSocket session configured for phone audio."""
+async def connect_realtime(instructions: str, text_only: bool = False):
+    """Open a Realtime API WebSocket session configured for phone audio.
+
+    text_only=True: el modelo responde en TEXTO (modo hibrido — otro servicio,
+    p. ej. ElevenLabs, sintetiza la voz). El audio de ENTRADA sigue igual.
+    """
     if not settings.openai_api_key:
         raise ValueError("OpenAI API key is not configured for realtime voice mode")
 
@@ -58,26 +62,28 @@ async def connect_realtime(instructions: str):
 
     # Forma GA de la API Realtime (la beta fue deshabilitada): session.type=realtime,
     # audio.input/output.format en vez de input_audio_format, audio/pcmu = g711_ulaw.
+    audio_config = {
+        "input": {
+            "format": {"type": "audio/pcmu"},
+            "transcription": {
+                "model": "gpt-4o-mini-transcribe",
+                "language": "es",
+            },
+            "turn_detection": _turn_detection_config(),
+        },
+    }
+    if not text_only:
+        audio_config["output"] = {
+            "format": {"type": "audio/pcmu"},
+            "voice": settings.openai_realtime_voice,
+        }
     session_update = {
         "type": "session.update",
         "session": {
             "type": "realtime",
-            "output_modalities": ["audio"],
+            "output_modalities": ["text"] if text_only else ["audio"],
             "instructions": f"{instructions}\n\n## Voz y estilo oral\n{settings.openai_realtime_speaking_style}",
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcmu"},
-                    "transcription": {
-                        "model": "gpt-4o-mini-transcribe",
-                        "language": "es",
-                    },
-                    "turn_detection": _turn_detection_config(),
-                },
-                "output": {
-                    "format": {"type": "audio/pcmu"},
-                    "voice": settings.openai_realtime_voice,
-                },
-            },
+            "audio": audio_config,
         },
     }
 
@@ -85,7 +91,7 @@ async def connect_realtime(instructions: str):
     logger.info(
         "Realtime session initialized with model=%s voice=%s",
         settings.openai_realtime_model,
-        settings.openai_realtime_voice,
+        "elevenlabs(texto)" if text_only else settings.openai_realtime_voice,
     )
     return ws
 

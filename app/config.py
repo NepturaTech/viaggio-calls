@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # "server_vad" (por silencio) o "semantic_vad" (por contenido; mas natural
     # con muletillas/ruido, algo mas de latencia). Cambiar por .env sin deploy.
     openai_realtime_turn_detection: str = "server_vad"
+    # Voz del modo Realtime: "openai" = voz nativa GPT; "elevenlabs" = hibrido
+    # (GPT Realtime pasa a modo texto y ElevenLabs sintetiza con la voz clonada
+    # de Andrea, ulaw_8000 directo a Twilio). Requiere ELEVENLABS_API_KEY.
+    realtime_tts_provider: str = "openai"
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = "b2htR0pMe28pYwCY9gnP"  # voz Andrea (la misma de CR)
+    elevenlabs_tts_model: str = "eleven_flash_v2_5"
     openai_realtime_speaking_style: str = (
         "Habla con acento COLOMBIANO (bogotano/andino): entonacion suave y melodica, "
         "seseo latinoamericano, tuteo respetuoso. "
