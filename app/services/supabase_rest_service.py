@@ -1,7 +1,7 @@
 import logging
 import time
 from functools import lru_cache
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -427,6 +427,26 @@ def _summarize_food_entries(document_number: str) -> list[dict[str, Any]]:
             "created_at": data.get("created_at") or record.get("created_at"),
         })
     return summaries
+
+
+def get_recent_food_entries(document_number: str, minutes: int = 15) -> list[dict[str, Any]]:
+    """Query EN VIVO de food_entries para validar "ya envié la foto" durante la llamada.
+
+    A diferencia de _summarize_food_entries (datasets, lento), consulta la tabla
+    directo por PostgREST con timeout de 5 s. Ventana de `minutes` hacia atrás
+    para cubrir el envío hecho justo antes o durante la llamada.
+    """
+    document = _as_text(document_number)
+    if not document:
+        return []
+    since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    return _request_rows("viaggio", "food_entries", {
+        "select": "created_at,meal_type,logged_food",
+        "paciente_identificacion": f"eq.{document}",
+        "created_at": f"gte.{since}",
+        "order": "created_at.desc",
+        "limit": "3",
+    })
 
 
 def _summarize_conversations(document_number: str) -> list[dict[str, Any]]:

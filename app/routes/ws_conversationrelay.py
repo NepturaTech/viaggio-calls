@@ -31,7 +31,12 @@ from app.services.realtime_service import (
     request_initial_greeting,
     update_session_instructions,
 )
-from app.services.supabase_rest_service import get_active_call_script, get_huella_visit_context, get_patient_dataset_context
+from app.services.supabase_rest_service import (
+    get_active_call_script,
+    get_huella_visit_context,
+    get_patient_dataset_context,
+    get_recent_food_entries,
+)
 from app.services.twilio_service import hangup_call, start_call_recording
 
 logger = logging.getLogger(__name__)
@@ -75,6 +80,13 @@ class ConversationSession:
     def add_assistant_message(self, text: str):
         self.conversation_history.append({"role": "assistant", "content": text})
 
+
+# Afirmaciones tipo "ya lo envié / ya la mandé / ya agregué / acabo de subir la foto".
+# ponytail: regex simple; si genera falsos positivos, exigir mención de comida/foto cerca.
+FOOD_SENT_CLAIM_PATTERN = re.compile(
+    r"\b(ya|acab[oé]\s+de)\b.{0,25}\b(envi\w+|mand\w+|agregu\w+|sub[ií]\w*|registr\w+|carg\w+|hice|logr\w+|qued[óo]|list[oa])\b",
+    re.IGNORECASE,
+)
 
 REPORT_REQUEST_PATTERN = re.compile(
     r"\b(reporte|informe)\b"
@@ -611,6 +623,36 @@ async def conversation_relay_ws(websocket: WebSocket):
                     session.pending_hangup = _should_end_call(user_text)
                     _report_requested = bool(REPORT_REQUEST_PATTERN.search(user_text))
 
+                    # ── Validación en vivo: "ya envié la foto de la comida" ──
+                    # Si el usuario afirma haber registrado, consultar food_entries
+                    # DIRECTO (PostgREST, 5 s máx) y decirle al modelo la verdad
+                    # comprobada en vez de dejarlo asumir. La nota va solo al turno
+                    # del modelo, NO al historial ni al transcript.
+                    _model_input = user_text
+                    if session.patient_id and FOOD_SENT_CLAIM_PATTERN.search(user_text):
+                        _entries = await loop.run_in_executor(
+                            None, get_recent_food_entries, session.patient_id
+                        )
+                        if _entries:
+                            _e = _entries[0]
+                            _model_input += (
+                                "\n\n[VERIFICACIÓN AUTOMÁTICA DE LA PLATAFORMA: SÍ aparece un "
+                                f"registro de comida reciente ({_e.get('logged_food') or 'sin detalle'}, "
+                                f"{_e.get('created_at')}). Confírmaselo con entusiasmo y menciona qué registró.]"
+                            )
+                        else:
+                            _model_input += (
+                                "\n\n[VERIFICACIÓN AUTOMÁTICA DE LA PLATAFORMA: NO aparece todavía "
+                                "ningún registro de comida reciente. NO le confirmes que quedó registrado. "
+                                "Dile amablemente que aún no aparece, que a veces tarda un momento, y "
+                                "pídele que revise que la foto sí se haya enviado al chat de Viaggio.]"
+                            )
+                        logger.info(
+                            "Food-claim verificado: doc=%s encontrados=%d call=%s",
+                            session.patient_id, len(_entries), session.call_sid,
+                        )
+                    # ─────────────────────────────────────────────────────────
+
                     # ── Streaming de respuesta Claude ────────────────────────
                     # Enviamos tokens a Twilio conforme Claude los genera.
                     # ElevenLabs empieza a sintetizar voz con los primeros tokens
@@ -627,7 +669,7 @@ async def conversation_relay_ws(websocket: WebSocket):
                     async for _tok in generate_response_stream(
                         session.system_prompt,
                         session.conversation_history[:-1],
-                        user_text,
+                        _model_input,
                     ):
                         _tokens.append(_tok)
                         _buf += _tok
