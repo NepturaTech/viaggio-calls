@@ -55,11 +55,12 @@ def generate_conversation_relay_twiml(
     base_url = _validate_public_base_url()
 
     # NOTA: Para ConversationRelay la grabación se inicia via Recordings REST API
-    # (make_outbound_call usa record=True; inbound usa start_call_recording() desde el WebSocket).
-    # <Start><Record> en TwiML NO es compatible con ConversationRelay.
-    # Solo preparamos el saludo con el aviso legal si la grabación está habilitada.
-    if settings.twilio_recording_enabled:
-        welcome_greeting = _build_recording_announcement(welcome_greeting)
+    # (start_call_recording() desde el WebSocket). <Start><Record> en TwiML NO es
+    # compatible con ConversationRelay.
+    # El aviso legal (ley 1581) YA NO se antepone al saludo: era lo PRIMERO que oía
+    # el paciente y la llamada sonaba a grabación automática. Ahora lo dice Andrea
+    # al inicio de su primer turno real (ws_conversationrelay.py) y la grabación
+    # arranca justo después, de modo que no se graba nada antes del aviso.
 
     connect = Connect()
     voice_settings = get_voice_settings()
@@ -195,8 +196,11 @@ async def make_outbound_call(
         if call_source:
             voice_url += f"&call_source={quote(call_source, safe='')}"
 
+        # ConversationRelay: la grabación NO arranca aquí sino en el WebSocket,
+        # justo después de que Andrea dice el aviso legal (ver ws_conversationrelay).
+        # El path Realtime sigue con el aviso en el saludo → conserva record=True.
         recording_kwargs = {}
-        if settings.twilio_recording_enabled:
+        if settings.twilio_recording_enabled and settings.twilio_voice_mode != "conversation_relay":
             recording_kwargs = {
                 "record": True,
                 "recording_channels": settings.twilio_recording_channels or "dual",

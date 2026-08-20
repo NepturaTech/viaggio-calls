@@ -73,6 +73,9 @@ class ConversationSession:
         # Noise / short input handling: when True the previous bot turn was "¿Disculpa?"
         # and we are waiting for the user to either clarify or confirm "nada".
         self._disculpa_pending: bool = False
+        # Aviso legal de grabación (ley 1581): se dice una sola vez, al inicio del
+        # primer turno real del paciente, no en el saludo del TwiML.
+        self._legal_notice_sent: bool = False
 
     def add_user_message(self, text: str):
         self.conversation_history.append({"role": "user", "content": text})
@@ -417,9 +420,8 @@ async def conversation_relay_ws(websocket: WebSocket):
                 # El primer handler de `prompt` awaitará el future antes de llamar a GPT.
                 session._context_future = loop.run_in_executor(None, _load_session_context, session)
 
-                # Para llamadas entrantes: iniciar grabación ahora (no necesita contexto).
-                if "outbound" not in session.direction and _get_settings().twilio_recording_enabled:
-                    loop.run_in_executor(None, start_call_recording, call_sid)
+                # La grabación (entrante y saliente) arranca en el primer turno real
+                # del paciente, justo después del aviso legal — nunca antes.
 
                 if session.call_id:
                     log_call_event(session.call_id, "setup", event)
@@ -600,6 +602,31 @@ async def conversation_relay_ws(websocket: WebSocket):
                 if archive is not None:
                     archive.append_transcript("user", user_text)
 
+                # ── Aviso legal de grabación (ley 1581) ──────────────────────
+                # Antes iba antepuesto al welcome_greeting del TwiML: era lo primero
+                # que se oía y la llamada sonaba a bot. Ahora se envía como primer
+                # chunk del turno del modelo (Twilio lo dice con la voz de Andrea) y
+                # la grabación arranca inmediatamente después → cero audio grabado
+                # sin aviso. Es determinista a propósito: si dependiera del prompt,
+                # el modelo lo parafrasearía u omitiría, y es requisito legal.
+                _notice_said = ""
+                _notice = (_get_settings().twilio_recording_announcement or "").strip()
+                if _notice and _get_settings().twilio_recording_enabled and not session._legal_notice_sent:
+                    session._legal_notice_sent = True
+                    _notice_said = _notice + " "
+                    await websocket.send_text(json.dumps({
+                        "type": "text",
+                        "token": _notice_said,
+                        "last": False,
+                    }))
+                    if session.call_sid:
+                        loop.run_in_executor(None, start_call_recording, session.call_sid)
+                    logger.info(
+                        "Aviso legal dicho en el turno %d y grabación iniciada (call=%s)",
+                        turn, session.call_sid,
+                    )
+                # ─────────────────────────────────────────────────────────────
+
                 # ── Moderación de contenido ──────────────────────────────────
                 is_flagged, flag_category = await moderate_user_input(user_text)
                 if is_flagged:
@@ -705,6 +732,10 @@ async def conversation_relay_ws(websocket: WebSocket):
                             session.patient_id, session.customer_phone, session.call_sid,
                         )
                 # ────────────────────────────────────────────────────────────
+
+                # El aviso ya salió por el WS como parte de este turno: queda en el
+                # historial y en el transcript como evidencia de que se dijo.
+                ai_response = _notice_said + ai_response
 
                 session.add_assistant_message(ai_response)
                 logger.info("=== TURNO %d — MODELO ===\n  %s", turn, ai_response)
