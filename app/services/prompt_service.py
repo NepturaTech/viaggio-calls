@@ -63,13 +63,13 @@ def _format_huella_date(value: object) -> str:
 def _clean_welcome_greeting(text: str) -> str:
     cleaned = " ".join((text or "").split())
     cleaned = re.sub(
-        r"Hola,\s*hablo con\s*\?\s*Te habla Andrea\.?\s*",
+        r"Hola,\s*¿?hablo con\s*\?\s*Te habla Andrea\.?\s*",
         "Hola, te habla Andrea. ",
         cleaned,
         flags=re.IGNORECASE,
     )
     cleaned = re.sub(
-        r"Hola,\s*hablo con\s*\?\s*",
+        r"Hola,\s*¿?hablo con\s*\?\s*",
         "Hola, te habla Andrea. ",
         cleaned,
         flags=re.IGNORECASE,
