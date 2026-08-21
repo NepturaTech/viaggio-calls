@@ -22,7 +22,11 @@ from app.services.openai_service import (
     moderate_user_input,
 )
 from app.services.report_service import send_whatsapp_report
-from app.services.prompt_service import build_context_prompt
+from app.services.prompt_service import (
+    IDENTITY_CONFIRMED_PATTERN,
+    build_call_intro,
+    build_context_prompt,
+)
 from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
 from app.services.elevenlabs_tts_service import ElevenLabsSpeaker
@@ -609,21 +613,31 @@ async def conversation_relay_ws(websocket: WebSocket):
                 # la grabación arranca inmediatamente después → cero audio grabado
                 # sin aviso. Es determinista a propósito: si dependiera del prompt,
                 # el modelo lo parafrasearía u omitiría, y es requisito legal.
+                # La PRESENTACIÓN va delante del aviso: el paciente debe oír primero
+                # de qué proyecto se le llama, no una advertencia legal seca. También
+                # es determinista — por prompt el modelo se re-presentaba y decía
+                # "de parte del hospital", que está prohibido (ver build_call_intro).
                 _notice_said = ""
-                _notice = (_get_settings().twilio_recording_announcement or "").strip()
-                if _notice and _get_settings().twilio_recording_enabled and not session._legal_notice_sent:
+                if not session._legal_notice_sent:
                     session._legal_notice_sent = True
-                    _notice_said = _notice + " "
+                    _confirmed = bool(IDENTITY_CONFIRMED_PATTERN.search(user_text))
+                    _intro = build_call_intro(
+                        session._customer_snapshot, session.script, _confirmed
+                    )
+                    _notice = (_get_settings().twilio_recording_announcement or "").strip()
+                    _grabar = bool(_notice) and _get_settings().twilio_recording_enabled
+                    _notice_said = _intro + (f"{_notice} " if _grabar else "")
                     await websocket.send_text(json.dumps({
                         "type": "text",
                         "token": _notice_said,
                         "last": False,
                     }))
-                    if session.call_sid:
+                    if _grabar and session.call_sid:
                         loop.run_in_executor(None, start_call_recording, session.call_sid)
                     logger.info(
-                        "Aviso legal dicho en el turno %d y grabación iniciada (call=%s)",
-                        turn, session.call_sid,
+                        "Turno %d: presentación dicha (identidad_confirmada=%s) + aviso legal=%s "
+                        "y grabación iniciada (call=%s)",
+                        turn, _confirmed, _grabar, session.call_sid,
                     )
                 # ─────────────────────────────────────────────────────────────
 

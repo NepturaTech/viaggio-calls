@@ -69,6 +69,57 @@ def test_sin_hospital_no_inventa_uno():
     assert "NO menciones ningun hospital" in p
 
 
+
+
+# ── Presentacion determinista del turno 1 ───────────────────────────────────
+from app.services.prompt_service import (  # noqa: E402
+    IDENTITY_CONFIRMED_PATTERN,
+    build_call_intro,
+)
+
+SCRIPT_PV = {"name": "proxima_visita", "project_name": "Proyecto de diabetes mellitus tipo 2"}
+
+
+def test_intro_con_identidad_confirmada():
+    intro = build_call_intro(CLIENTE, SCRIPT_PV, identity_confirmed=True)
+    assert intro.startswith("Que bueno, Maria Perez. ")
+    assert "Te habla Andrea, del proyecto de diabetes mellitus tipo 2" in intro
+    assert "que realizamos junto con el Hospital San Juan de Dios" in intro
+    assert "de parte del" not in intro
+    assert intro.endswith(" ")  # se concatena con el aviso legal
+
+
+def test_intro_sin_confirmar_usa_etiqueta_neutra():
+    intro = build_call_intro(CLIENTE, SCRIPT_PV, identity_confirmed=False)
+    assert "proyecto de Biomarcadores" in intro
+    assert "diabetes" not in intro.lower()
+    assert "Hospital" not in intro
+
+
+def test_intro_sin_hospital_no_inventa():
+    sin_hosp = {k: v for k, v in CLIENTE.items() if k != "hospital_name"}
+    intro = build_call_intro(sin_hosp, SCRIPT_PV, identity_confirmed=True)
+    assert "junto con el" not in intro
+    assert "Hospital" not in intro
+
+
+def test_deteccion_de_confirmacion():
+    confirma = ["sí", "con él.", "Sí con él", "con ella", "soy yo", "Sí, hablas con él",
+                "claro", "así es", "Con ella habla"]
+    no_confirma = ["Aló?", "¿quién habla?", "casi no escucho", "un momento",
+                   "gracias", "no", "¿de parte de quién?"]
+    for t in confirma:
+        assert IDENTITY_CONFIRMED_PATTERN.search(t), t
+    for t in no_confirma:
+        assert not IDENTITY_CONFIRMED_PATTERN.search(t), t
+
+
+def test_el_modelo_ya_no_debe_presentarse():
+    p = _prompt()
+    assert "TU PRESENTACION YA SE DIJO AUTOMATICAMENTE" in p
+    assert "NO la escribas tu" in p
+
+
 if __name__ == "__main__":
     for nombre, fn in sorted(globals().items()):
         if nombre.startswith("test_"):

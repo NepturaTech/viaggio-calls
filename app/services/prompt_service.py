@@ -49,6 +49,50 @@ DEFAULT_SYSTEM_PROMPT = """Eres Andrea, una asistente telefonica automatizada pa
 
 DEFAULT_WELCOME = "Hola, hablo con {call_name}?"
 
+# Antes de confirmar identidad puede contestar un familiar: decir el nombre clinico
+# real ("proyecto de diabetes mellitus tipo 2") o el hospital le revela una condicion
+# de salud a quien no es el paciente. Etiqueta neutra hasta que la persona confirme.
+PRE_CONFIRM_LABEL = "proyecto de Biomarcadores"
+
+# Respuestas con las que la persona confirma que es ella, en el turno 1.
+# Estricto a proposito: un falso positivo dice el nombre clinico del proyecto a
+# quien todavia no confirmo ser el paciente. Ante la duda, etiqueta neutra.
+IDENTITY_CONFIRMED_PATTERN = re.compile(
+    r"\b(s[ií]|con\s+[eé]l(?:la)?|con\s+ell[ao]s|soy\s+yo|"
+    r"ell?a?\s+habla|habla\s+con|claro|correcto|as[ií]\s+es|"
+    r"a\s+la\s+orden|con\s+la\s+misma)\b",
+    re.IGNORECASE,
+)
+
+
+def build_call_intro(
+    customer: dict | None,
+    script: dict | None,
+    identity_confirmed: bool,
+) -> str:
+    """Presentacion del turno 1, dicha por codigo y no por el modelo.
+
+    Es determinista por la misma razon que el aviso legal: por prompt el modelo
+    la parafraseaba, se re-presentaba y decia "de parte del hospital" (prohibido).
+    Si la persona aun no confirmo quien es, usa la etiqueta neutra: quien contesta
+    puede ser un familiar y el nombre clinico del proyecto revela una condicion.
+    """
+    customer = customer or {}
+    name = (get_call_name(customer) or "").strip()
+    project = (
+        customer.get("project_name")
+        or (script.get("project_name") if script else None)
+        or "proyecto de diabetes mellitus tipo 2"
+    )
+    hospital = (customer.get("hospital_name") or "").strip()
+
+    saludo = f"Que bueno, {name}. " if (identity_confirmed and name) else ""
+    if not identity_confirmed:
+        return f"{saludo}Te habla Andrea, del {PRE_CONFIRM_LABEL}. "
+    if hospital:
+        return f"{saludo}Te habla Andrea, del {project}, que realizamos junto con el {hospital}. "
+    return f"{saludo}Te habla Andrea, del {project}. "
+
 
 def _format_huella_date(value: object) -> str:
     if not value:
@@ -303,11 +347,6 @@ def build_context_prompt(
     project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
     call_name = get_call_name(customer) or customer.get("full_name", "")
     hospital_label = hospital_name or "el hospital del proyecto"
-    # Antes de confirmar identidad puede contestar un familiar: decir el nombre
-    # clinico real ("proyecto de diabetes mellitus tipo 2") o el hospital le
-    # revela una condicion de salud a quien no es el paciente. Etiqueta neutra
-    # hasta que la persona confirme quien es.
-    PRE_CONFIRM_LABEL = "proyecto de Biomarcadores"
 
     # ── Tipo de llamada: se infiere del nombre del script ────────────────────
     # seguimiento / default → visita de campo ya realizada, preguntar por salud
@@ -337,10 +376,12 @@ def build_context_prompt(
     if hospital_name:
         context += (
             "\n## Instrucciones de presentacion\n"
-            f"- Presentate UNA sola vez, y solo DESPUES de que la persona confirme su identidad.\n"
-            f"- La llamada es DEL proyecto, junto con el hospital. NUNCA digas 'de parte del {hospital_name}'.\n"
-            f"- Al presentarte usa exactamente: 'Te habla Andrea, del {project_name}, que realizamos junto con el {hospital_name}'.\n"
-            f"- No vuelvas a repetir el nombre del hospital despues de esa presentacion.\n"
+            f"- TU PRESENTACION YA SE DIJO AUTOMATICAMENTE al inicio de tu primer turno "
+            f"('Te habla Andrea, del {project_name}, que realizamos junto con el {hospital_name}'). "
+            f"NO te presentes, NO digas 'te habla Andrea' y NO repitas el nombre del proyecto ni "
+            f"del hospital: continua DIRECTO con el motivo de la llamada.\n"
+            f"- La llamada es DEL proyecto, junto con el hospital. NUNCA digas 'de parte del "
+            f"{hospital_name}' ni 'de parte del hospital', aunque el guion cargado te lo pida.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Evita despedidas exageradas o demasiado afectuosas.\n"
             "- Evita repetir 'del hospital' o 'del proyecto' al despedirte si ya lo dijiste antes.\n"
@@ -351,9 +392,11 @@ def build_context_prompt(
     else:
         context += (
             "\n## Instrucciones de presentacion\n"
-            f"- Presentate UNA sola vez, y solo DESPUES de que la persona confirme su identidad.\n"
-            f"- Al presentarte usa exactamente: 'Te habla Andrea, del {project_name}'.\n"
-            "- NO menciones ningun hospital: para este paciente no hay hospital aliado registrado.\n"
+            f"- TU PRESENTACION YA SE DIJO AUTOMATICAMENTE al inicio de tu primer turno "
+            f"('Te habla Andrea, del {project_name}'). NO te presentes ni la repitas: "
+            f"continua DIRECTO con el motivo de la llamada.\n"
+            "- NO menciones ningun hospital: para este paciente no hay hospital aliado registrado, "
+            "aunque el guion cargado te pida decir 'de parte del hospital'.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Si el usuario quiere terminar, cierra de forma breve y amable.\n"
         )
@@ -364,13 +407,15 @@ def build_context_prompt(
         "(aparece como tu primer turno en el historial). "
         f"Ese saludo SOLO pregunto si hablas con {call_name}: no dijo tu nombre, "
         "no menciono el hospital y no menciono el proyecto. "
-        "Por lo tanto NO vuelvas a saludar y NUNCA inicies tu respuesta con 'Hola, hablo con...', "
-        "pero SI debes presentarte una vez cuando la persona confirme su identidad.\n"
+        "Por lo tanto NO vuelvas a saludar y NUNCA inicies tu respuesta con 'Hola, hablo con...'.\n"
+        "- Tu presentacion ('Te habla Andrea, del ...') se antepone AUTOMATICAMENTE al inicio de tu "
+        "primer turno, junto con el aviso legal de grabacion. NO la escribas tu: tu texto debe "
+        "empezar directamente por el motivo de la llamada, o sonara repetido.\n"
         f"- Si la persona confirma su identidad ('si', 'si con ella', 'soy yo', 'con ella habla' o equivalente), "
-        f"NO vuelvas a confirmar ni a presentarte: continua directo con el motivo. "
-        f"Usa una frase breve como: 'Que bueno, {call_name}. Te llamo para {_call_open_reason}. {_call_open_q}'\n"
+        f"continua directo con el motivo. Empieza por algo como: "
+        f"'Te llamo para {_call_open_reason}. {_call_open_q}'\n"
         f"- Si la persona responde algo ambiguo o muy corto ('alo', 'si?', 'quien es') sin confirmar con claridad, "
-        f"aclara UNA sola vez de forma breve: 'Te habla Andrea, del {PRE_CONFIRM_LABEL}. ¿Hablo con {call_name}?'\n"
+        f"pregunta UNA sola vez de forma breve: '¿Hablo con {call_name}?'\n"
         f"- Si preguntan 'de parte de quien' o 'quien habla' y AUN NO ha confirmado su identidad, "
         f"responde breve: 'Te habla Andrea, del {PRE_CONFIRM_LABEL}. ¿Hablo con {call_name}?'\n"
         f"- MIENTRAS NO HAYA CONFIRMADO su identidad no digas '{project_name}' ni el nombre de ningun "
