@@ -671,8 +671,9 @@ async def conversation_relay_ws(websocket: WebSocket):
                             _model_input += (
                                 "\n\n[VERIFICACIÓN AUTOMÁTICA DE LA PLATAFORMA: NO aparece todavía "
                                 "ningún registro de comida reciente. NO le confirmes que quedó registrado. "
-                                "Dile amablemente que aún no aparece, que a veces tarda un momento, y "
-                                "pídele que revise que la foto sí se haya enviado al chat de Viaggio.]"
+                                "Dile amablemente que aún no aparece y que a veces tarda un momento. "
+                                "Si la foto es el obstáculo, ofrécele registrar por TEXTO: que escriba en "
+                                "el chat de Viaggio qué comió, con eso queda registrado igual.]"
                             )
                         logger.info(
                             "Food-claim verificado: doc=%s encontrados=%d call=%s",

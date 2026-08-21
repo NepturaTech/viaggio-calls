@@ -303,6 +303,11 @@ def build_context_prompt(
     project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
     call_name = get_call_name(customer) or customer.get("full_name", "")
     hospital_label = hospital_name or "el hospital del proyecto"
+    # Antes de confirmar identidad puede contestar un familiar: decir el nombre
+    # clinico real ("proyecto de diabetes mellitus tipo 2") o el hospital le
+    # revela una condicion de salud a quien no es el paciente. Etiqueta neutra
+    # hasta que la persona confirme quien es.
+    PRE_CONFIRM_LABEL = "proyecto de Biomarcadores"
 
     # ── Tipo de llamada: se infiere del nombre del script ────────────────────
     # seguimiento / default → visita de campo ya realizada, preguntar por salud
@@ -332,12 +337,10 @@ def build_context_prompt(
     if hospital_name:
         context += (
             "\n## Instrucciones de presentacion\n"
-            f"- Presentate una sola vez al inicio.\n"
-            f"- Explica que llamas por el {project_name}.\n"
-            f"- Di que te comunicas de parte del {hospital_name}.\n"
-            f"- Si la persona confirma que si es ella, en tu siguiente respuesta vuelve a mencionar con claridad que llamas de parte del {hospital_name} antes de pasar a la siguiente pregunta.\n"
-            f"- Despues de confirmar identidad, usa una frase parecida a: 'mucho gusto, te habla Andrea. Me comunico de parte del {hospital_name} por el {project_name}'.\n"
-            "- No menciones Biomarcadores repetidamente.\n"
+            f"- Presentate UNA sola vez, y solo DESPUES de que la persona confirme su identidad.\n"
+            f"- La llamada es DEL proyecto, junto con el hospital. NUNCA digas 'de parte del {hospital_name}'.\n"
+            f"- Al presentarte usa exactamente: 'Te habla Andrea, del {project_name}, que realizamos junto con el {hospital_name}'.\n"
+            f"- No vuelvas a repetir el nombre del hospital despues de esa presentacion.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Evita despedidas exageradas o demasiado afectuosas.\n"
             "- Evita repetir 'del hospital' o 'del proyecto' al despedirte si ya lo dijiste antes.\n"
@@ -348,10 +351,9 @@ def build_context_prompt(
     else:
         context += (
             "\n## Instrucciones de presentacion\n"
-            f"- Presentate una sola vez al inicio por el {project_name}.\n"
-            "- Di que te comunicas de parte del hospital del proyecto.\n"
-            "- Si la persona confirma que si es ella, vuelve a mencionar de forma breve que llamas de parte del hospital del proyecto antes de seguir.\n"
-            "- No menciones Biomarcadores repetidamente.\n"
+            f"- Presentate UNA sola vez, y solo DESPUES de que la persona confirme su identidad.\n"
+            f"- Al presentarte usa exactamente: 'Te habla Andrea, del {project_name}'.\n"
+            "- NO menciones ningun hospital: para este paciente no hay hospital aliado registrado.\n"
             "- No repitas el nombre del paciente innecesariamente.\n"
             "- Si el usuario quiere terminar, cierra de forma breve y amable.\n"
         )
@@ -360,17 +362,20 @@ def build_context_prompt(
         "\n## Flujo exacto de apertura\n"
         "- IMPORTANTE: el saludo de bienvenida YA fue reproducido al inicio de la llamada "
         "(aparece como tu primer turno en el historial). "
-        f"Ese saludo ya dijo tu nombre (Andrea), ya menciono el {hospital_label} y el {project_name}, "
-        f"y ya pregunto si hablas con {call_name}. "
-        "Por lo tanto NO vuelvas a saludar, NO repitas 'te habla Andrea' ni el nombre del hospital o del proyecto, "
-        "y NUNCA inicies tu respuesta con 'Hola, hablo con...'.\n"
+        f"Ese saludo SOLO pregunto si hablas con {call_name}: no dijo tu nombre, "
+        "no menciono el hospital y no menciono el proyecto. "
+        "Por lo tanto NO vuelvas a saludar y NUNCA inicies tu respuesta con 'Hola, hablo con...', "
+        "pero SI debes presentarte una vez cuando la persona confirme su identidad.\n"
         f"- Si la persona confirma su identidad ('si', 'si con ella', 'soy yo', 'con ella habla' o equivalente), "
         f"NO vuelvas a confirmar ni a presentarte: continua directo con el motivo. "
         f"Usa una frase breve como: 'Que bueno, {call_name}. Te llamo para {_call_open_reason}. {_call_open_q}'\n"
         f"- Si la persona responde algo ambiguo o muy corto ('alo', 'si?', 'quien es') sin confirmar con claridad, "
-        f"aclara UNA sola vez de forma breve: 'Te habla Andrea, del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
-        f"- Si preguntan 'de parte de quien' o 'quien habla', responde breve: "
-        f"'Te habla Andrea, del {hospital_label} por el {project_name}. ¿Hablo con {call_name}?'\n"
+        f"aclara UNA sola vez de forma breve: 'Te habla Andrea, del {PRE_CONFIRM_LABEL}. ¿Hablo con {call_name}?'\n"
+        f"- Si preguntan 'de parte de quien' o 'quien habla' y AUN NO ha confirmado su identidad, "
+        f"responde breve: 'Te habla Andrea, del {PRE_CONFIRM_LABEL}. ¿Hablo con {call_name}?'\n"
+        f"- MIENTRAS NO HAYA CONFIRMADO su identidad no digas '{project_name}' ni el nombre de ningun "
+        f"hospital: quien contesta puede ser un familiar y eso le revelaria una condicion de salud "
+        f"del paciente. Usa solo '{PRE_CONFIRM_LABEL}' hasta que confirme.\n"
         "- No mezcles la confirmacion de identidad con el motivo largo de la llamada en la misma respuesta "
         "salvo que la identidad ya este confirmada.\n"
         f"- Cuando uses el nombre del paciente, di SIEMPRE nombre y apellido tal como aparece en '{call_name}'. "
@@ -475,7 +480,7 @@ def build_context_prompt(
         "  - Si el usuario pregunta cuándo es la visita, responde que precisamente para eso te estás comunicando.\n"
         "  - Usa la sección 'Fecha y hora de la llamada' para ofrecer opciones concretas de días disponibles.\n"
         "  - Antes de proponer los días, usa el hospital exacto de la sección 'Institución de esta llamada' (NUNCA 'hospital correspondiente').\n"
-        "  - Ejemplo: 'Te llamo de parte del [hospital exacto] para coordinar la visita. ¿Qué día de esta semana te quedaría mejor? Podría ser [días disponibles].'\n"
+        "  - Ejemplo: 'Te llamo del proyecto, que realizamos junto con el [hospital exacto], para coordinar la visita. ¿Qué día de esta semana te quedaría mejor? Podría ser [días disponibles].'\n"
         "  - Si el usuario pregunta si puede ser un día que ya pasó esta semana, explica con amabilidad los días que aún quedan disponibles.\n"
         "  - Si hoy es jueves o viernes y las opciones de esta semana son pocas, ofrece también la semana siguiente.\n"
         "  - DESPUÉS de que el usuario confirme el día, pregunta también la hora: '¿Y a qué hora del día te quedaría mejor, en la mañana o en la tarde?' Si el usuario da una hora específica dentro del rango válido, acéptala. Si dice 'mañana', propone entre 8 a.m. y 12 m. Si dice 'tarde', propone entre 1 p.m. y 4 p.m. NUNCA sugieras ni aceptes visitas después de las 5 p.m.\n"
@@ -490,6 +495,46 @@ def build_context_prompt(
         "- Si el usuario pregunta quién fue el visitador, usa los datos de la sección 'Visita de campo (Huella)' para responder con el nombre y rol del visitador registrado.\n"
         "- Si Huella no tiene datos cargados, responde con honestidad: 'No tengo registros de visita disponibles en este momento, pero el equipo del proyecto tiene esa información.'\n"
       )
+
+    # ── Objeciones reales al registro de comidas ─────────────────────────────
+    # Redactado desde 38 transcripts de llamadas reales (08-17 a 08-21). El
+    # motivo mas frecuente ("ya me la comi, no hay foto") hacia que Andrea
+    # insistiera hasta 6 veces por una foto imposible, tirando el dato que la
+    # paciente ya le habia dicho en voz. La foto NO es obligatoria: el registro
+    # por texto en el chat de Viaggio vale igual (hoy es el 44% de los registros).
+    if _is_seguimiento:
+        context += (
+            "\n## Si el paciente no ha registrado sus comidas\n"
+            "- Primero PREGUNTA por que y escucha. Cada motivo tiene una salida distinta.\n"
+            "- Nunca pidas lo mismo mas de DOS veces: si ya dijo que no puede, cambia de camino.\n"
+            "- REGLA BASE: la foto NO es obligatoria. Escribir la comida en el chat de Viaggio "
+            "queda registrado igual. Ofrece el texto apenas la foto sea un obstaculo.\n"
+            "- 'Ya me la comi / no le tome foto / no hay evidencia': NO vuelvas a pedir la foto, "
+            "esa comida ya paso. Di: 'No te preocupes, no necesitas foto. Escribelo tal cual en el "
+            "chat de Viaggio y queda registrado igual.' Si ya te conto que comio, REPITESELO con sus "
+            "palabras para que solo tenga que copiarlo.\n"
+            "- 'Me da pena / las fotos son muy personales': no defiendas la privacidad de la "
+            "plataforma, quita el obstaculo. 'Tranquila, no tiene que mandar ninguna foto: "
+            "escribalo y con eso queda.'\n"
+            "- 'No se manejar WhatsApp / no se donde enviar': un paso a la vez, sin tecnicismos. "
+            "Si la foto le cuesta, ofrece el texto: escribir es mas facil que fotografiar.\n"
+            "- 'No tengo tiempo / estoy trabajando': con un registro al dia basta. Acuerda un momento "
+            "CONCRETO, no 'cuando pueda', y menciona que por texto toma segundos.\n"
+            "- 'Se me olvida': normalizalo, no reganes. Uno al dia basta.\n"
+            "- 'El puntaje sale bajito / me toca especificar que es': valida el esfuerzo, NO defiendas "
+            "la plataforma ni expliques el puntaje. Lo valioso es el registro, no la nota.\n"
+            "- 'Estoy cansado de tantos mensajes': con uno al dia es suficiente.\n"
+            "- 'He estado enferma / no me provoca comer / estoy en ayunas por un examen': NO insistas. "
+            "Prioriza como se siente. Comer poco o no comer TAMBIEN es informacion util y puede "
+            "escribirlo tal cual. Si hay sintomas o dolor, escalalo al equipo de salud.\n"
+            "- 'Ya termine los 15 dias del sensor': el seguimiento del proyecto continua igual.\n"
+            "- Si tras dos intentos no puede ahora, acuerda un momento concreto, agradece y cierra.\n"
+            "\n## Nunca confirmes un registro que no te conste\n"
+            "- NUNCA digas 'ya quedo registrado' ni 'con eso ya retomaste', ni felicites por un "
+            "registro, salvo que recibas una nota [VERIFICACION AUTOMATICA DE LA PLATAFORMA] que lo "
+            "confirme. Si dice que ya envio y no tienes esa confirmacion, agradece y dile que a veces "
+            "tarda un momento en aparecer, sin darlo por hecho.\n"
+        )
 
     return base_prompt + context
 
