@@ -74,10 +74,39 @@ def test_sin_hospital_no_inventa_uno():
 # ── Presentacion determinista del turno 1 ───────────────────────────────────
 from app.services.prompt_service import (  # noqa: E402
     IDENTITY_CONFIRMED_PATTERN,
+    PRE_CONFIRM_LABEL,
     build_call_intro,
 )
 
 SCRIPT_PV = {"name": "proxima_visita", "project_name": "Proyecto de diabetes mellitus tipo 2"}
+
+# El script real de produccion: system_prompt vacio en BD, pero carga esta guia.
+SCRIPT_REACTIVACION_REAL = {
+    "name": "reactivacion_seguimiento",
+    "system_prompt": "",
+    "knowledge_base_file": "app/users/DELFOS_Prompt_Bot_Reactivacion.md",
+}
+
+
+def _assert_no_ordena_presentarse(p):
+    """Ningun bloque del prompt puede pedir una presentacion: la dice el codigo."""
+    for orden in ("preséntate EXACTAMENTE así", "presentate EXACTAMENTE asi",
+                  "Preséntate en tu PRIMER turno", "Presentate en tu PRIMER turno",
+                  "Te presentas SIEMPRE"):
+        assert orden not in p, orden
+
+    # La unica presentacion que el prompt puede pedir hablada es la etiqueta neutra
+    # (respuesta a "¿de parte de quien?" antes de confirmar). Cualquier otra linea
+    # con "Te habla Andrea" tiene que ser una PROHIBICION, no una instruccion.
+    prohibicion = ("YA SE DIJO", "NO te presentes", "NO la escribas")
+    for linea in p.splitlines():
+        if "Te habla Andrea" not in linea:
+            continue
+        if PRE_CONFIRM_LABEL in linea:
+            assert "diabetes mellitus" not in linea, linea
+            assert "Hospital" not in linea, linea
+            continue
+        assert any(marca in linea for marca in prohibicion), linea
 
 
 def test_intro_con_identidad_confirmada():
@@ -118,6 +147,31 @@ def test_el_modelo_ya_no_debe_presentarse():
     p = _prompt()
     assert "TU PRESENTACION YA SE DIJO AUTOMATICAMENTE" in p
     assert "NO la escribas tu" in p
+
+
+def test_ningun_bloque_ordena_presentarse():
+    """La presentacion la dice el codigo (build_call_intro), no el modelo.
+
+    El 08-24, con el fix del 08-21 ya desplegado, 3 de 12 llamadas seguian oyendo
+    la etiqueta neutra e inmediatamente el nombre clinico + el hospital en el mismo
+    turno, sin identidad confirmada. La causa no era el modelo: el bloque
+    "Institucion de esta llamada" seguia ORDENANDO "presentate EXACTAMENTE asi:
+    'Te habla Andrea, del {proyecto}, junto con el {hospital}'" — mas concreto y
+    mas arriba en el prompt que la prohibicion de abajo. Este test falla si algun
+    bloque vuelve a pedir una presentacion.
+    """
+    _assert_no_ordena_presentarse(_prompt())
+
+
+def test_la_guia_del_proyecto_tampoco_ordena_presentarse():
+    """La guia cargada por knowledge_base_file entra en el prompt y es una 4a fuente.
+
+    El bloque "0. DATOS INSTITUCIONALES" de DELFOS_Prompt_Bot_Reactivacion.md decia
+    "Te presentas SIEMPRE con estos datos" y daba la frase con el hospital — y ese
+    archivo se carga en el 100% de las llamadas de reactivacion, que es el unico
+    script que se ha usado en produccion.
+    """
+    _assert_no_ordena_presentarse(_prompt(script=SCRIPT_REACTIVACION_REAL))
 
 
 if __name__ == "__main__":

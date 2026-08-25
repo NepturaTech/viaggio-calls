@@ -449,6 +449,31 @@ def get_recent_food_entries(document_number: str, minutes: int = 15) -> list[dic
     })
 
 
+def get_recent_calls(document_number: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Llamadas ANTERIORES al paciente, para que Andrea no arranque de cero.
+
+    Lee call_logs directo por PostgREST (rápido) en vez de los datasets, que
+    tardan 8-17 s cada uno. Hasta ahora call_logs solo se escribía.
+
+    Límite real de `transcript_summary`: NO es la conversación entera, son los
+    ÚLTIMOS 6 turnos cortados a 100 chars cada uno (ver finalize_call). Sirve para
+    saber en qué quedó la llamada anterior, no para reconstruirla.
+
+    Las filas sin transcript quedan fuera — son buzones, no-contesta y la llamada
+    EN CURSO, cuyo transcript_summary solo se escribe al colgar.
+    """
+    document = _as_text(document_number)
+    if not document:
+        return []
+    return _request_rows("viaggio", "call_logs", {
+        "select": "created_at,script_name,status,transcript_summary",
+        "patient_document_number": f"eq.{document}",
+        "transcript_summary": "not.is.null",
+        "order": "created_at.desc",
+        "limit": str(limit),
+    })
+
+
 def _summarize_conversations(document_number: str) -> list[dict[str, Any]]:
     settings = _settings()
     summaries = []
@@ -515,6 +540,7 @@ def get_patient_dataset_context(patient: dict | None) -> dict[str, Any]:
         "conversations": _summarize_conversations(document_number),
         "evalml": _summarize_evalml(document_number),
         "data_step": _summarize_data_step(document_number),
+        "previous_calls": get_recent_calls(document_number),
     }
 
 

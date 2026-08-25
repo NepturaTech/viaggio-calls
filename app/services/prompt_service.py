@@ -250,24 +250,31 @@ def build_context_prompt(
         or (script.get("project_name") if script else None)
         or "proyecto de diabetes mellitus tipo 2"
     )
+    # Este bloque son DATOS, no instrucciones de apertura. La presentación la dice
+    # el código (build_call_intro, antepuesta al turno 1). Cuando aquí se ordenaba
+    # "preséntate EXACTAMENTE así: 'Te habla Andrea, del {proyecto}, junto con el
+    # {hospital}'", el modelo obedecía esta orden — más concreta y más arriba en el
+    # prompt — por encima de la prohibición de más abajo, y el paciente oía la
+    # etiqueta neutra e inmediatamente el nombre clínico + el hospital en el mismo
+    # turno, sin haber confirmado su identidad (medido: 3 de 12 llamadas del 08-24).
     context += f"\n## Institución de esta llamada\n"
     context += f"- Proyecto: {_project}\n"
     if _hospital:
         context += f"- Hospital aliado: {_hospital}\n"
         context += (
-            f"- Cuando la persona confirme que es ella, preséntate EXACTAMENTE así: "
-            f"'Te habla Andrea, del {_project}, que realizamos junto con el {_hospital}'.\n"
+            f"- Si más adelante en la conversación necesitas nombrar al hospital, "
+            f"usa EXACTAMENTE '{_hospital}'; nunca 'hospital correspondiente' ni 'el hospital'.\n"
         )
     else:
         context += (
-            f"- Hospital aliado: no disponible. Cuando la persona confirme que es ella, "
-            f"preséntate EXACTAMENTE así: 'Te habla Andrea, del {_project}'. NO menciones ningún hospital.\n"
+            "- Hospital aliado: no disponible. NO menciones ningún hospital en ningún "
+            "momento, aunque el guion cargado te lo pida.\n"
         )
     context += (
         "- La llamada es DEL PROYECTO, junto con el hospital; NUNCA digas 'de parte del hospital', "
         "'del hospital de referencia' ni frases que hagan parecer que llamas directamente del hospital.\n"
-        "- El saludo inicial solo pregunta por la persona. Preséntate en tu PRIMER turno, "
-        "después de que confirme, y recién ahí explica el motivo de la llamada.\n"
+        "- NO te presentes: tu presentación ya se antepone automáticamente al inicio de tu primer "
+        "turno (ver '## Flujo exacto de apertura'). Escribirla otra vez la duplica.\n"
     )
 
     if appointments:
@@ -299,6 +306,7 @@ def build_context_prompt(
     conversations = dataset_context.get("conversations") or []
     evalml = dataset_context.get("evalml") or {}
     data_step = dataset_context.get("data_step") or {}
+    previous_calls = dataset_context.get("previous_calls") or []
 
     if data_step:
         context += "\n## Actividad fisica reciente\n"
@@ -342,6 +350,23 @@ def build_context_prompt(
                 f"- {item.get('tipo_mensaje') or 'mensaje'}: "
                 f"{(item.get('contenido') or '')[:220]}\n"
             )
+
+    # Llamadas previas: hasta ahora call_logs solo se escribía, así que Andrea
+    # arrancaba de cero en cada llamada y no podía responder "¿qué me dijeron la
+    # vez pasada?". Ojo al límite: transcript_summary son los ÚLTIMOS 6 turnos
+    # cortados a 100 chars, o sea el CIERRE de la llamada, no la conversación.
+    if previous_calls:
+        context += "\n## Llamadas anteriores a este paciente\n"
+        for item in previous_calls:
+            fecha = _format_huella_date(item.get("created_at")) or "sin fecha"
+            resumen = " ".join((item.get("transcript_summary") or "").split())[:400]
+            context += f"- {fecha} ({item.get('script_name') or 'llamada'}): {resumen}\n"
+        context += (
+            "- Esto es el CIERRE de cada llamada (ultimos turnos), NO la conversacion completa: "
+            "no afirmes que se dijo algo que no aparezca aqui.\n"
+            "- Usalo solo si el paciente pregunta por una llamada anterior o para no repetir algo "
+            "que ya se hablo. No lo recites ni abras la llamada mencionandolo.\n"
+        )
 
     hospital_name = customer.get("hospital_name")
     project_name = customer.get("project_name") or "proyecto de diabetes mellitus tipo 2"
@@ -482,6 +507,7 @@ def build_context_prompt(
         "- Si el usuario pregunta por actividad fisica, pasos, movimiento, habitos diarios o seguimiento de actividad, usa la fuente conceptual de data_step.\n"
         "- Si el usuario pregunta por mediciones, resultados, evaluaciones, indicadores o registros tomados en la app BioMon, usa la fuente conceptual de evalml.\n"
         "- Si el usuario pregunta por conversaciones previas, mensajes o historial conversacional con Viaggio, usa la fuente conceptual de conversaciones.\n"
+        "- Si el usuario pregunta por una llamada anterior, por lo que se hablo la vez pasada o por algo que ya le dijeron por telefono, usa la seccion 'Llamadas anteriores a este paciente'. Si esa seccion no aparece en el contexto, di con honestidad que no tienes el detalle de llamadas previas a la mano.\n"
         "- Si el usuario pregunta por alimentacion, comidas, registros de comida o seguimiento nutricional, usa la fuente conceptual de food_entries.\n"
         "- Si el usuario pregunta por la visita domiciliaria, visita de campo, quien fue a la casa, cuando fue la visita, que se hizo en la visita o seguimiento del equipo en terreno, usa la fuente conceptual de Huella.\n"
         "- Dentro de Huella, apoyate conceptualmente en interviewees para datos del entrevistado, sessions para sesiones o visitas registradas, y visitors para informacion del visitador o profesional de campo.\n"
