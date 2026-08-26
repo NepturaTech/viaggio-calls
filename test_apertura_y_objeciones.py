@@ -174,6 +174,41 @@ def test_la_guia_del_proyecto_tampoco_ordena_presentarse():
     _assert_no_ordena_presentarse(_prompt(script=SCRIPT_REACTIVACION_REAL))
 
 
+
+def test_no_promete_enviar_sms_ni_el_numero():
+    """No existe canal de SMS en el codigo; Andrea lo prometio igual.
+
+    26-ago, llamada CA29b057 a Fabian Huertas: perdio el chat de Viaggio y Andrea
+    respondio "te envio el numero por mensaje de texto en este momento". grep de
+    messages.create/send_sms en app/ da 0 resultados: el paciente colgo esperando
+    un mensaje que nunca iba a llegar, y sin ese numero no podia registrar nada.
+    Lo que si ocurre de verdad es el flow de ManyChat al colgar.
+    """
+    from app.routes.ws_conversationrelay import LOST_CONTACT_PATTERN
+
+    dichos_reales = [
+        "Perdi el contacto de via, Yo no lo tengo en mi WhatsApp borrar las conversaciones.",
+        "confirmamelo porque borre todos los de las conversaciones del WhatsApp",
+        "no me llego el mensaje de Viaggio",
+        "cual es el numero de Viaggio",
+        "dame el numero",
+    ]
+    for frase in dichos_reales:
+        assert LOST_CONTACT_PATTERN.search(frase), frase
+
+    no_deben_disparar = [
+        "Si, hablas con el.",
+        "lo envio mas tarde.",
+        "ya lo mande por whatsapp",
+        "No he tenido tiempo",
+    ]
+    for frase in no_deben_disparar:
+        assert not LOST_CONTACT_PATTERN.search(frase), frase
+
+    prompt = _prompt().lower()
+    assert "nunca ofrezcas enviar un sms" in prompt
+
+
 if __name__ == "__main__":
     for nombre, fn in sorted(globals().items()):
         if nombre.startswith("test_"):

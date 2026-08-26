@@ -94,6 +94,36 @@ def build_call_intro(
     return f"{saludo}Te habla Andrea, del {project}. "
 
 
+# El aviso legal viene del .env de cada maquina (TWILIO_RECORDING_ANNOUNCEMENT) y
+# ahi no lo puedo corregir desde aqui, asi que se sanea en codigo. Dos cosas medidas
+# en las llamadas del 26-ago: (1) el texto arranca con "Hola," y ahora va DETRAS de
+# la presentacion, o sea "Te habla Andrea... Hola, esta llamada sera grabada" —
+# suena a dos llamadas pegadas; (2) "ley 1581" el TTS la lee "quince ochenta y uno".
+_SALUDOS_SOBRANTES = (
+    "hola, buenos dias.", "hola, buenas tardes.", "hola, buenas noches.",
+    "hola buenos dias.", "hola, buen dia.", "buenos dias.", "buenas tardes.",
+    "buenas noches.", "hola,", "hola.", "hola",
+)
+
+_LEY_HABLADA = "mil quinientos ochenta y uno"
+
+
+def format_legal_notice(texto: str | None) -> str:
+    """Deja el aviso legal listo para TTS: sin saludo delante y con la ley en letras."""
+    aviso = (texto or "").strip()
+    if not aviso:
+        return ""
+    bajo = aviso.lower()
+    for saludo in _SALUDOS_SOBRANTES:
+        if bajo.startswith(saludo):
+            aviso = aviso[len(saludo):].lstrip()
+            aviso = aviso[:1].upper() + aviso[1:]
+            break
+    for variante in ("1581", "15 81", "15-81", "15.81"):
+        aviso = aviso.replace(variante, _LEY_HABLADA)
+    return aviso
+
+
 def _format_huella_date(value: object) -> str:
     if not value:
         return ""
@@ -499,6 +529,9 @@ def build_context_prompt(
         "Si el usuario pregunta como registrarse en BioMon, di que puede descargarse la app BioMon desde su tienda de aplicaciones. "
         "Si pregunta como usar Viaggio, di que es el chat de WhatsApp con el que ya interactuaron o van a interactuar. "
         "NUNCA digas que las mediciones se hacen por WhatsApp — eso es incorrecto.\n"
+        "NUNCA ofrezcas enviar un SMS, un mensaje de texto, un WhatsApp ni el numero de "
+        "Viaggio: no tienes forma de enviar nada. Si perdio el contacto, dile que al "
+        "terminar la llamada Viaggio le escribe por WhatsApp y que responda en ese chat.\n"
     )
 
     context += (
@@ -617,6 +650,12 @@ def get_call_name(customer: dict | None) -> str:
     full_name = (customer.get("full_name") or "").strip()
     if not full_name:
         return ""
+
+    # El registry del fast path trae el nombre en MAYUSCULAS ("FABIAN ANDRES
+    # HUERTAS REYES") y el TTS lo dice tal cual, gritado. Solo se normaliza si
+    # viene todo en mayusculas: un nombre ya bien escrito no se toca.
+    if not any(c.islower() for c in full_name):
+        full_name = full_name.title()
 
     parts = [part for part in full_name.split() if part]
     if len(parts) == 1:

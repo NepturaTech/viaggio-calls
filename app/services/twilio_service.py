@@ -5,6 +5,7 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.config import get_settings
+from app.services.prompt_service import format_legal_notice
 from app.services.supabase_rest_service import get_voice_settings
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ def _validate_public_base_url() -> str:
 
 def _build_recording_announcement(welcome_greeting: str | None) -> str:
     greeting = (welcome_greeting or "").strip()
-    announcement = (settings.twilio_recording_announcement or "").strip()
+    announcement = format_legal_notice(settings.twilio_recording_announcement)
     if not announcement:
         return greeting
     if greeting.lower().startswith(announcement.lower()):

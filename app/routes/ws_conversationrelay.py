@@ -24,6 +24,7 @@ from app.services.openai_service import (
 from app.services.report_service import send_whatsapp_report
 from app.services.prompt_service import (
     IDENTITY_CONFIRMED_PATTERN,
+    format_legal_notice,
     build_call_intro,
     build_context_prompt,
 )
@@ -92,6 +93,18 @@ class ConversationSession:
 # ponytail: regex simple; si genera falsos positivos, exigir mención de comida/foto cerca.
 FOOD_SENT_CLAIM_PATTERN = re.compile(
     r"\b(ya|acab[oé]\s+de)\b.{0,25}\b(envi\w+|mand\w+|agregu\w+|sub[ií]\w*|registr\w+|carg\w+|hice|logr\w+|qued[óo]|list[oa])\b",
+    re.IGNORECASE,
+)
+
+# El paciente dice que no tiene por donde escribirle a Viaggio. Andrea NO puede
+# enviar SMS ni mensajes (no existe ese canal en el codigo) y sin esto lo promete
+# igual: medido el 26-ago, se ofrecio a mandar el numero "por mensaje de texto".
+# Lo que si ocurre de verdad: al colgar se dispara el flow de ManyChat y Viaggio
+# le escribe por WhatsApp.
+LOST_CONTACT_PATTERN = re.compile(
+    r"(perd[ií]|borr[ée]|no\s+(tengo|me\s+lleg\w+|encuentro|s[eé]\s+cu[aá]l)|"
+    r"cu[aá]l\s+es|p[aá]same|env[ií]a\w*me|m[aá]nda\w*me|d[ií]game|d[ae]me|dame)\b"
+    r".{0,40}\b(n[uú]mero|contacto|chat|conversaci\w+|whats\w*|mensaje)",
     re.IGNORECASE,
 )
 
@@ -624,7 +637,7 @@ async def conversation_relay_ws(websocket: WebSocket):
                     _intro = build_call_intro(
                         session._customer_snapshot, session.script, _confirmed
                     )
-                    _notice = (_get_settings().twilio_recording_announcement or "").strip()
+                    _notice = format_legal_notice(_get_settings().twilio_recording_announcement)
                     _grabar = bool(_notice) and _get_settings().twilio_recording_enabled
                     _notice_said = _intro + (f"{_notice} " if _grabar else "")
                     await websocket.send_text(json.dumps({
@@ -692,6 +705,22 @@ async def conversation_relay_ws(websocket: WebSocket):
                         logger.info(
                             "Food-claim verificado: doc=%s encontrados=%d call=%s",
                             session.patient_id, len(_entries), session.call_sid,
+                        )
+
+                    # ── "perdi el numero de Viaggio" ────────────────────────
+                    # Andrea no tiene canal de SMS. Se lo decimos aqui para que
+                    # no invente un envio: el WhatsApp real sale al colgar.
+                    if LOST_CONTACT_PATTERN.search(user_text):
+                        _model_input += (
+                            "\n\n[DATO DE LA PLATAFORMA: NO puedes enviar mensajes de texto, "
+                            "SMS ni WhatsApp, y NO tienes el numero a la mano. NUNCA prometas "
+                            "enviarlo. Lo que si pasa de verdad: apenas termine esta llamada, "
+                            "Viaggio le escribe por WhatsApp. Dile que responda en ESE chat con "
+                            "una foto de su ultima comida, o escribiendo que comio si no tiene foto.]"
+                        )
+                        logger.info(
+                            "Contacto perdido: nota anti-SMS inyectada call=%s",
+                            session.call_sid,
                         )
                     # ─────────────────────────────────────────────────────────
 
