@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     manychat_no_answer_flow_ns: str = ""   # Flow NS del flow a disparar
     # Flow a disparar al terminar una llamada de reactivación (override por env)
     manychat_reactivation_flow_ns: str = "content20260620113511_304633"
+    # Flow que le recuerda el numero de Viaggio — se dispara EN MEDIO de la
+    # llamada cuando el paciente dice que perdio el chat/el numero.
+    manychat_lost_contact_flow_ns: str = "content20260827141001_938175"
 
     # Audio storage
     audio_storage_enabled: bool = False

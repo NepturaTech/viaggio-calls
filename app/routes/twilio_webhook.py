@@ -241,6 +241,12 @@ async def handle_call_status(
                 "ManyChat reactivation flow: omitido, la llamada %s fue voicemail/no-answer",
                 CallSid,
             )
+        elif (registry or {}).get("lost_contact_flow_sent"):
+            # Ya le mandamos el flow del numero EN MEDIO de la llamada.
+            logger.info(
+                "ManyChat reactivation flow: omitido, ya se envio el de contacto perdido sid=%s",
+                CallSid,
+            )
         elif is_reactivation_script(script_name):
             phone = (registry or {}).get("patient_phone", "")
             manychat_user_id = (registry or {}).get("manychat_user_id", "")

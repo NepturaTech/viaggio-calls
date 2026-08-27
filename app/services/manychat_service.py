@@ -249,3 +249,23 @@ async def trigger_reactivation_flow(
         manychat_user_id=manychat_user_id,
         call_purpose=call_purpose,
     )
+
+
+async def trigger_lost_contact_flow(
+    phone: str,
+    manychat_user_id: str | None = None,
+    call_purpose: str | None = None,
+) -> bool:
+    """Flow que reenvia el numero de Viaggio (MANYCHAT_LOST_CONTACT_FLOW_NS).
+
+    Se dispara EN MEDIO de la llamada, cuando el paciente dice que perdio el
+    chat. Devuelve True solo si el mensaje salio de verdad: Andrea unicamente
+    puede decir "te acabamos de enviar el mensaje" cuando esto es True.
+    """
+    return await _dispatch_flow(
+        get_settings().manychat_lost_contact_flow_ns,
+        phone,
+        "lost_contact",
+        manychat_user_id=manychat_user_id,
+        call_purpose=call_purpose,
+    )

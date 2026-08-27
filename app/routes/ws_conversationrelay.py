@@ -43,6 +43,7 @@ from app.services.supabase_rest_service import (
     get_recent_food_entries,
 )
 from app.services.twilio_service import hangup_call, start_call_recording
+from app.services.manychat_service import trigger_lost_contact_flow
 
 logger = logging.getLogger(__name__)
 
@@ -711,16 +712,46 @@ async def conversation_relay_ws(websocket: WebSocket):
                     # Andrea no tiene canal de SMS. Se lo decimos aqui para que
                     # no invente un envio: el WhatsApp real sale al colgar.
                     if LOST_CONTACT_PATTERN.search(user_text):
-                        _model_input += (
-                            "\n\n[DATO DE LA PLATAFORMA: NO puedes enviar mensajes de texto, "
-                            "SMS ni WhatsApp, y NO tienes el numero a la mano. NUNCA prometas "
-                            "enviarlo. Lo que si pasa de verdad: apenas termine esta llamada, "
-                            "Viaggio le escribe por WhatsApp. Dile que responda en ESE chat con "
-                            "una foto de su ultima comida, o escribiendo que comio si no tiene foto.]"
-                        )
+                        _reg = get_call_patient(session.call_sid) or {}
+                        _sent = bool(_reg.get("lost_contact_flow_sent"))
+                        if not _sent:
+                            try:
+                                _sent = await asyncio.wait_for(
+                                    trigger_lost_contact_flow(
+                                        _reg.get("patient_phone", ""),
+                                        manychat_user_id=_reg.get("manychat_user_id") or None,
+                                    ),
+                                    timeout=4.0,
+                                )
+                            except Exception as exc:  # timeout o error de ManyChat
+                                logger.warning(
+                                    "Contacto perdido: flow ManyChat fallo call=%s: %s",
+                                    session.call_sid, exc,
+                                )
+                            if _sent and _reg:
+                                # Marca para que /twilio/status no mande TAMBIEN
+                                # el flow de reactivacion al colgar.
+                                _reg["lost_contact_flow_sent"] = True
+
+                        if _sent:
+                            _model_input += (
+                                "\n\n[DATO DE LA PLATAFORMA: le acabamos de enviar AHORA MISMO un "
+                                "mensaje de WhatsApp con el numero y el chat de Viaggio. Diselo tal "
+                                "cual: que le acabas de enviar el mensaje y que lo revise. Pidele que "
+                                "responda en ESE chat con una foto de su ultima comida, o escribiendo "
+                                "que comio si no tiene foto. NO dictes el numero por telefono.]"
+                            )
+                        else:
+                            _model_input += (
+                                "\n\n[DATO DE LA PLATAFORMA: NO puedes enviar mensajes de texto, "
+                                "SMS ni WhatsApp, y NO tienes el numero a la mano. NUNCA prometas "
+                                "enviarlo. Lo que si pasa de verdad: apenas termine esta llamada, "
+                                "Viaggio le escribe por WhatsApp. Dile que responda en ESE chat con "
+                                "una foto de su ultima comida, o escribiendo que comio si no tiene foto.]"
+                            )
                         logger.info(
-                            "Contacto perdido: nota anti-SMS inyectada call=%s",
-                            session.call_sid,
+                            "Contacto perdido: flow_enviado=%s call=%s",
+                            _sent, session.call_sid,
                         )
                     # ─────────────────────────────────────────────────────────
 
