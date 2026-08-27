@@ -10,7 +10,7 @@ from app.services.twilio_service import (
     hangup_call,
     make_outbound_call,
 )
-from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken, record_call_attempt, is_in_cooldown
+from app.db.repositories import store_pending_call_params, register_call_patient, get_call_patient, human_has_spoken, record_call_attempt, is_in_cooldown, mark_call_active, mark_call_ended, active_call_count
 from app.services.call_log_service import create_call_record, mark_call_not_answered, was_call_not_answered
 from app.services.customer_service import get_customer_context
 from app.services.prompt_service import get_welcome_greeting
@@ -204,6 +204,8 @@ async def handle_call_status(
     import asyncio
     logger.info("Call status update: SID=%s, Status=%s, Duration=%s", CallSid, CallStatus, CallDuration)
     normalized = (CallStatus or "").strip().lower()
+    if normalized in {"completed", "no-answer", "busy", "failed", "canceled"}:
+        mark_call_ended(CallSid)
     if normalized in {"no-answer", "busy", "failed", "canceled"}:
         delete_call_archive(CallSid)
         registry = get_call_patient(CallSid)
@@ -382,6 +384,22 @@ async def trigger_outbound_call(
         source: Origen de la llamada — quién la generó (ej. 'whatsapp', 'viaggio',
             'api', 'frontend'). Por defecto 'api'.
     """
+    # Tope de simultáneas: se rechaza ANTES de marcar en Twilio. Si dejamos
+    # entrar más de las que la VM aguanta, el paciente escucha el "we're sorry"
+    # de Twilio en vez de a Andrea.
+    _max = get_settings().max_concurrent_calls
+    _en_curso = active_call_count()
+    if _en_curso >= _max:
+        logger.warning(
+            "trigger_outbound_call rechazado por tope de simultáneas: %d/%d phone=%s",
+            _en_curso, _max, to_number,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Hay {_en_curso} llamadas en curso (tope {_max}). "
+                   f"Espera a que termine alguna e intenta de nuevo.",
+        )
+
     # Cooldown: rechazar si el mismo número recibió una llamada hace menos de 5 min.
     in_cd, remaining = is_in_cooldown(to_number)
     if in_cd:
@@ -411,6 +429,8 @@ async def trigger_outbound_call(
             status_code=502,
             detail=f"Twilio rechazó la llamada: {exc.msg}",
         ) from exc
+
+    mark_call_active(call_sid)
 
     # Marcar el intento para activar el cooldown en las próximas 5 minutos
     record_call_attempt(to_number)

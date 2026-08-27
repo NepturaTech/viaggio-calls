@@ -123,6 +123,36 @@ def human_has_spoken(call_sid: str) -> bool:
     return bool(entry and entry.get("human_spoke"))
 
 
+# ── Llamadas en curso (tope de simultaneas) ──────────────────────────────
+# call_sid -> time.monotonic() del inicio. Se limpia en /twilio/status, y por
+# antiguedad para que un webhook perdido no deje el cupo trabado para siempre.
+_active_calls: dict[str, float] = {}
+
+# ponytail: dict en memoria del proceso uvicorn. Si algun dia corren 2 workers,
+# el tope pasa a ser por worker => moverlo a Redis o a una tabla.
+_ACTIVE_CALL_MAX_SECONDS = 15 * 60
+
+
+def mark_call_active(call_sid: str) -> None:
+    """Registra una llamada como en curso (cuenta contra MAX_CONCURRENT_CALLS)."""
+    _active_calls[call_sid] = time.monotonic()
+
+
+def mark_call_ended(call_sid: str) -> None:
+    """Libera el cupo de una llamada terminada."""
+    _active_calls.pop(call_sid, None)
+
+
+def active_call_count() -> int:
+    """Llamadas en curso, descartando las colgadas hace mas de 15 min."""
+    limite = time.monotonic() - _ACTIVE_CALL_MAX_SECONDS
+    for sid, inicio in list(_active_calls.items()):
+        if inicio < limite:
+            logger.warning("Cupo liberado por antiguedad (webhook perdido?): sid=%s", sid)
+            del _active_calls[sid]
+    return len(_active_calls)
+
+
 class CustomerRepository:
     def find_by_phone(self, phone_number: str) -> dict | None:
         normalized = phone_number.strip().replace(" ", "")

@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     whatsapp_report_api_key: str = ""
     whatsapp_report_url: str = "https://xibrxuqiybcalkrtycpi.supabase.co/functions/v1/send-report-by-document"
 
+    # Tope de llamadas simultaneas. Rechaza con 429 en /outbound antes de
+    # marcar en Twilio, para no saturar la VM ni las lecturas de Supabase.
+    max_concurrent_calls: int = 5
+
     # ManyChat — automatización cuando no se contesta la llamada
     manychat_api_key: str = ""
     manychat_no_answer_flow_ns: str = ""   # Flow NS del flow a disparar
