@@ -176,7 +176,8 @@ async def handle_incoming_call(
     )
 
     # Return TwiML using the configured voice mode
-    if settings.twilio_voice_mode == "realtime":
+    # "grok" usa el MISMO stream y el mismo bridge; solo cambia el backend de voz.
+    if settings.twilio_voice_mode in ("realtime", "grok"):
         try:
             twiml = generate_realtime_stream_twiml(
                 customer_phone=customer_phone,
@@ -186,7 +187,8 @@ async def handle_incoming_call(
                 welcome_greeting=welcome,
             )
         except Exception:
-            logger.exception("Realtime mode TwiML generation failed; falling back to ConversationRelay")
+            logger.exception(
+                "TwiML de %s fallo; se cae a ConversationRelay", settings.twilio_voice_mode)
             twiml = generate_conversation_relay_twiml(welcome_greeting=welcome, script_name=script_name)
     else:
         twiml = generate_conversation_relay_twiml(welcome_greeting=welcome, script_name=script_name)

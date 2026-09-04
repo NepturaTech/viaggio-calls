@@ -31,11 +31,7 @@ from app.services.prompt_service import (
 from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
 from app.services.elevenlabs_tts_service import ElevenLabsSpeaker
-from app.services.realtime_service import (
-    connect_realtime,
-    request_initial_greeting,
-    update_session_instructions,
-)
+from app.services import grok_realtime_service, realtime_service
 from app.services.supabase_rest_service import (
     get_active_call_script,
     get_huella_visit_context,
@@ -46,6 +42,31 @@ from app.services.twilio_service import hangup_call, start_call_recording
 from app.services.manychat_service import trigger_lost_contact_flow
 
 logger = logging.getLogger(__name__)
+
+
+def _voice_backend():
+    """Backend de voz segun TWILIO_VOICE_MODE: "grok" = xAI, resto = OpenAI.
+
+    Ambos modulos exponen el mismo contrato (connect_realtime /
+    request_initial_greeting / update_session_instructions) y hablan g711
+    mu-law 8k, asi que el bridge de abajo es identico para los dos.
+    """
+    if _get_settings().twilio_voice_mode == "grok":
+        return grok_realtime_service
+    return realtime_service
+
+
+async def connect_realtime(*args, **kwargs):
+    return await _voice_backend().connect_realtime(*args, **kwargs)
+
+
+async def request_initial_greeting(*args, **kwargs):
+    return await _voice_backend().request_initial_greeting(*args, **kwargs)
+
+
+async def update_session_instructions(*args, **kwargs):
+    return await _voice_backend().update_session_instructions(*args, **kwargs)
+
 
 router = APIRouter(tags=["websocket"])
 
@@ -886,10 +907,18 @@ async def realtime_media_ws(websocket: WebSocket):
     archive_finalized = False
     # Hibrido: GPT Realtime en modo texto + ElevenLabs como voz (Andrea clonada).
     _rt_settings = _get_settings()
+    grok_mode = _rt_settings.twilio_voice_mode == "grok"
     eleven_mode = (
-        _rt_settings.realtime_tts_provider == "elevenlabs"
+        not grok_mode
+        and _rt_settings.realtime_tts_provider == "elevenlabs"
         and bool(_rt_settings.elevenlabs_api_key)
     )
+    if grok_mode and _rt_settings.realtime_tts_provider == "elevenlabs":
+        logger.warning(
+            "TWILIO_VOICE_MODE=grok ignora REALTIME_TTS_PROVIDER=elevenlabs: "
+            "el hibrido solo existe para OpenAI — se usa la voz nativa de Grok (%s)",
+            _rt_settings.xai_voice,
+        )
     if _rt_settings.realtime_tts_provider == "elevenlabs" and not eleven_mode:
         logger.warning(
             "REALTIME_TTS_PROVIDER=elevenlabs pero falta ELEVENLABS_API_KEY — "
@@ -897,7 +926,8 @@ async def realtime_media_ws(websocket: WebSocket):
         )
 
     logger.info("Realtime media WebSocket connected (tts=%s)",
-                "elevenlabs" if eleven_mode else "openai")
+                "grok:" + _rt_settings.xai_voice if grok_mode
+                else "elevenlabs" if eleven_mode else "openai")
 
     def finalize_archive_once():
         nonlocal archive_finalized, archive

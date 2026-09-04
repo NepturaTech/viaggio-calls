@@ -115,6 +115,16 @@ class Settings(BaseSettings):
     )
     ffmpeg_path: str = ""
 
+    # xAI / Grok Voice (TWILIO_VOICE_MODE=grok). Mismo bridge que Realtime:
+    # xAI habla g711 mu-law 8k igual que Twilio (medido 2026-09-04), no hay
+    # resampleo. OJO: una voz invalida NO da error, usa `ara` en silencio.
+    xai_api_key: str = ""
+    xai_realtime_model: str = "grok-voice-latest"
+    xai_voice: str = "carina"
+    xai_realtime_silence_ms: int = 500
+    xai_realtime_vad_threshold: float = 0.85
+    xai_realtime_turn_detection: str = "server_vad"
+
     # WhatsApp report
     whatsapp_report_api_key: str = ""
     whatsapp_report_url: str = "https://xibrxuqiybcalkrtycpi.supabase.co/functions/v1/send-report-by-document"
