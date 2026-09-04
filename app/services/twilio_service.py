@@ -160,6 +160,12 @@ def generate_realtime_stream_twiml(
     # al saludo para que Andrea lo diga (request_initial_greeting exige el saludo exacto).
     if settings.twilio_recording_enabled:
         welcome_greeting = _build_recording_announcement(welcome_greeting)
+    # Mismo espiritu que el guard de BASE_URL: si falta la key el fallo ocurriria
+    # DENTRO del WebSocket, donde ya no hay fallback y la llamada queda MUDA.
+    if settings.twilio_voice_mode == "grok" and not settings.xai_api_key:
+        raise ValueError(
+            "TWILIO_VOICE_MODE=grok pero falta XAI_API_KEY: se cae a ConversationRelay."
+        )
     response = VoiceResponse()
     connect = response.connect()
     stream = connect.stream(url=_realtime_ws_url(settings.base_url))
