@@ -466,7 +466,7 @@ def get_recent_calls(document_number: str, limit: int = 3) -> list[dict[str, Any
     if not document:
         return []
     return _request_rows("viaggio", "call_logs", {
-        "select": "created_at,script_name,status,transcript_summary",
+        "select": "created_at,script_name,status,transcript_summary,memoria",
         "patient_document_number": f"eq.{document}",
         "transcript_summary": "not.is.null",
         "order": "created_at.desc",

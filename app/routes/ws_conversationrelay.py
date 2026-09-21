@@ -40,6 +40,7 @@ from app.services.supabase_rest_service import (
 )
 from app.services.twilio_service import hangup_call, start_call_recording
 from app.services.manychat_service import trigger_lost_contact_flow
+from app.services.call_memory_service import schedule_call_memory
 
 logger = logging.getLogger(__name__)
 
@@ -893,6 +894,7 @@ async def conversation_relay_ws(websocket: WebSocket):
                     for m in session.conversation_history[-6:]
                 )
                 finalize_call(session.call_id, final_status, summary=summary or None)
+                schedule_call_memory(session.call_sid, session.conversation_history, session.script_name)
         logger.info("ConversationRelay session ended: call=%s status=%s", session.call_sid, final_status)
 
 
@@ -1237,3 +1239,4 @@ async def realtime_media_ws(websocket: WebSocket):
                 for m in session.conversation_history[-6:]
             )
             finalize_call(session.call_id, "completed", summary=summary or "Realtime session ended")
+            schedule_call_memory(session.call_sid, session.conversation_history, session.script_name)

@@ -389,9 +389,17 @@ def build_context_prompt(
         context += "\n## Llamadas anteriores a este paciente\n"
         for item in previous_calls:
             fecha = _format_huella_date(item.get("created_at")) or "sin fecha"
-            resumen = " ".join((item.get("transcript_summary") or "").split())[:400]
+            # `memoria` = nota del resumidor sobre la llamada ENTERA (call_memory_service);
+            # las llamadas viejas o con el resumidor caido solo traen el cierre.
+            memoria = " | ".join(l.strip() for l in (item.get("memoria") or "").splitlines() if l.strip())
+            resumen = memoria[:700] or " ".join((item.get("transcript_summary") or "").split())[:400]
             context += f"- {fecha} ({item.get('script_name') or 'llamada'}): {resumen}\n"
         context += (
+            "- Las notas con etiquetas (REGISTRO, SITUACION_PERSONAL...) resumen la llamada entera; "
+            "las demas son solo el cierre.\n"
+            "- Si hay SITUACION_PERSONAL, tenla presente en el trato. Solo DESPUES de confirmar que "
+            "hablas con el paciente puedes preguntarle con tacto como ha seguido; nunca la menciones "
+            "a otra persona.\n"
             "- Esto es el CIERRE de cada llamada (ultimos turnos), NO la conversacion completa: "
             "no afirmes que se dijo algo que no aparezca aqui.\n"
             "- Usalo solo si el paciente pregunta por una llamada anterior o para no repetir algo "
