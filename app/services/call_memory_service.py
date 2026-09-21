@@ -9,11 +9,14 @@ Lo que es requisito va en codigo, no en el prompt: minimo de turnos, borrado de
 numeros largos (cedula/telefono), tope de largo y el descarte de SIN_CONTENIDO.
 """
 import asyncio
+import json
 import logging
 import re
 
+import httpx
+
 from app.config import get_settings
-from app.services.call_log_service import _patch_log_row
+from app.services.call_log_service import _log_endpoint, _log_headers
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,11 @@ NO_CONTENT = "SIN_CONTENIDO"
 # cedula, telefono o cualquier identificador: nunca deben quedar en la nota
 _LONG_NUMBER = re.compile(r"\+?\d[\d\s.\-]{5,}\d")
 _EMPTY_VALUE = re.compile(
-    r":\s*(sin (informaci[oó]n|datos?)|no (consta|aplica|mencion[oó]( nada)?)|ningun[oa]|nada|n/?a)\.?$",
+    # variantes reales del backfill: "sin informacion relevante reportada en esta
+    # llamada", "ninguno explicito del paciente", "ninguna adicional"...
+    r":\s*(|(sin (informaci[oó]n|datos?)|no (consta|aplica|mencion[oó]( nada)?)|ningun[oa]|nada|n/?a)"
+    r"(\s+(relevantes?|reportad[oa]s?|registrad[oa]s?|expl[ií]cit[oa]s?|adicional(es)?|mencionad[oa]s?|"
+    r"identificad[oa]s?|de salud|de barreras|del paciente|en esta llamada))*)\.?$",
     re.IGNORECASE,
 )
 
@@ -107,6 +114,34 @@ def clean_memory(text: str | None) -> str | None:
     return "\n".join(lines)[:MEMORY_MAX_CHARS] or None
 
 
+def _patch_memoria(call_sid: str, memoria: str) -> bool:
+    """Escribe en la tabla BASE `viaggio.call_logs` y exige que vuelva la fila.
+
+    No sirve `_patch_log_row`: apunta a `public.call_logs`, que es una VISTA con
+    lista de columnas fija y no tiene `memoria`; PostgREST responde "columna no
+    encontrada", el helper la descarta y devuelve True sin haber escrito nada
+    (asi el primer backfill reporto 87 escritas y la BD tenia 0).
+    """
+    endpoint = _log_endpoint()
+    if not endpoint:
+        return False
+    headers = {
+        **_log_headers(),
+        "Content-Profile": "viaggio",
+        "Accept-Profile": "viaggio",
+        "Prefer": "return=representation",
+    }
+    with httpx.Client(timeout=10.0) as http:
+        resp = http.patch(
+            endpoint,
+            headers=headers,
+            params={"call_sid": f"eq.{call_sid}", "select": "call_sid"},
+            content=json.dumps({"memoria": memoria}, ensure_ascii=False),
+        )
+        resp.raise_for_status()
+        return bool(resp.json())  # [] = ninguna fila con ese call_sid
+
+
 async def summarize_call(history: list[dict], script_name: str | None) -> str | None:
     if not has_enough_content(history):
         return None
@@ -139,7 +174,7 @@ async def save_call_memory(call_sid: str | None, history: list[dict], script_nam
         if not memoria:
             logger.info("Memoria de llamada: sin contenido util (call=%s)", call_sid)
             return
-        ok = await asyncio.to_thread(_patch_log_row, call_sid, {"memoria": memoria})
+        ok = await asyncio.to_thread(_patch_memoria, call_sid, memoria)
         logger.info("Memoria de llamada guardada=%s (call=%s, %d chars)", ok, call_sid, len(memoria))
     except Exception as exc:
         logger.warning("Memoria de llamada fallo (call=%s): %s", call_sid, exc)

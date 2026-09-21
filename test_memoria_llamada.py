@@ -39,6 +39,10 @@ def test_tope_de_largo_corta_por_lineas_enteras():
 
 def test_lineas_sin_dato_se_descartan():
     nota = cms.clean_memory("CONTESTO: paciente\nSALUD: sin información\nPREFERENCIAS: Ninguna.\n"
+                            "SITUACION_PERSONAL:\nEVITAR: ninguna mencionada\n"
+                            "SALUD: Sin información relevante reportada en esta llamada.\n"
+                            "COMPROMISO: ninguno explícito del paciente\n"
+                            "BARRERAS: sin información de barreras identificadas\n"
                             "BARRERAS: sin información de cómo usar WhatsApp, nadie le explicó")
     assert nota == "CONTESTO: paciente\nBARRERAS: sin información de cómo usar WhatsApp, nadie le explicó"
 

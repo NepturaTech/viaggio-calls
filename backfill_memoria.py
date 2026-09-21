@@ -14,7 +14,6 @@ import httpx
 
 from app.config import get_settings
 from app.services import call_memory_service as cms
-from app.services.call_log_service import _patch_log_row
 
 
 async def main(paths_file: str, write: bool) -> None:
@@ -39,10 +38,14 @@ async def main(paths_file: str, write: bool) -> None:
                 skipped += 1
                 print(f"-- {call_sid}: sin contenido util ({len(history)} turnos)")
                 continue
-            saved += 1
             print(f"\n== {call_sid} ({len(history)} turnos)\n{memoria}")
-            if write and not _patch_log_row(call_sid, {"memoria": memoria}):
+            try:
+                if write and not cms._patch_memoria(call_sid, memoria):
+                    raise RuntimeError("el PATCH no devolvio ninguna fila")
+                saved += 1
+            except Exception as exc:
                 failed += 1
+                print(f"!! {call_sid}: no se escribio: {exc}")
     print(f"\n{'ESCRITAS' if write else 'ENSAYO, nada escrito'}: notas={saved} sin_contenido={skipped} fallos={failed}")
 
 
