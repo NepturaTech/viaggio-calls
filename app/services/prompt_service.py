@@ -392,7 +392,7 @@ def build_context_prompt(
             # `memoria` = nota del resumidor sobre la llamada ENTERA (call_memory_service);
             # las llamadas viejas o con el resumidor caido solo traen el cierre.
             memoria = " | ".join(l.strip() for l in (item.get("memoria") or "").splitlines() if l.strip())
-            resumen = memoria[:700] or " ".join((item.get("transcript_summary") or "").split())[:400]
+            resumen = memoria[:1000] or " ".join((item.get("transcript_summary") or "").split())[:400]
             context += f"- {fecha} ({item.get('script_name') or 'llamada'}): {resumen}\n"
         context += (
             "- Las notas con etiquetas (REGISTRO, SITUACION_PERSONAL...) resumen la llamada entera; "

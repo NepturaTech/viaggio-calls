@@ -29,8 +29,18 @@ def test_borra_cedula_y_telefono_aunque_el_modelo_los_escriba():
     assert "a las 10" in cms.clean_memory("PREFERENCIAS: llamar a las 10 de la mañana")
 
 
-def test_tope_de_largo():
+def test_tope_de_largo_corta_por_lineas_enteras():
     assert len(cms.clean_memory("REGISTRO: " + "x" * 5000)) == cms.MEMORY_MAX_CHARS
+    # una etiqueta a medias ("EVITAR: n") le llegaria a Andrea como dato
+    nota = cms.clean_memory("\n".join(f"LINEA{i}: " + "y" * 100 for i in range(12)))
+    assert len(nota) <= cms.MEMORY_MAX_CHARS
+    assert all(len(l) > 100 for l in nota.splitlines())
+
+
+def test_lineas_sin_dato_se_descartan():
+    nota = cms.clean_memory("CONTESTO: paciente\nSALUD: sin información\nPREFERENCIAS: Ninguna.\n"
+                            "BARRERAS: sin información de cómo usar WhatsApp, nadie le explicó")
+    assert nota == "CONTESTO: paciente\nBARRERAS: sin información de cómo usar WhatsApp, nadie le explicó"
 
 
 def test_tercero_se_conserva_tal_cual():

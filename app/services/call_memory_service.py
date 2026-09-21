@@ -17,11 +17,15 @@ from app.services.call_log_service import _patch_log_row
 
 logger = logging.getLogger(__name__)
 
-MEMORY_MAX_CHARS = 700
+MEMORY_MAX_CHARS = 900
 MIN_USER_TURNS = 2
 NO_CONTENT = "SIN_CONTENIDO"
 # cedula, telefono o cualquier identificador: nunca deben quedar en la nota
 _LONG_NUMBER = re.compile(r"\+?\d[\d\s.\-]{5,}\d")
+_EMPTY_VALUE = re.compile(
+    r":\s*(sin (informaci[oó]n|datos?)|no (consta|aplica|mencion[oó]( nada)?)|ningun[oa]|nada|n/?a)\.?$",
+    re.IGNORECASE,
+)
 
 MEMORY_PROMPT = """Eres un asistente que escribe la NOTA DE SEGUIMIENTO de una llamada telefonica
 de un programa de salud. La nota la leera la misma agente ("Andrea") antes de
@@ -43,15 +47,15 @@ REGLAS
    y nada mas.
 5. Si no hubo conversacion real (buzon, colgo tras el saludo, menos de dos
    turnos con contenido del paciente), responde exactamente: SIN_CONTENIDO
-6. Omite las lineas que no tengan nada que decir. Maximo 600 caracteres en
-   total. Frases cortas, tercera persona, español.
+6. Omite las lineas que no tengan nada que decir. Cada linea, maximo 120
+   caracteres; la nota entera, maximo 700. Frases cortas, tercera persona, español.
 
 FORMATO (estas etiquetas, en este orden, una por linea)
 CONTESTO: paciente
-REGISTRO: registra / no registra / irregular, y el motivo con sus palabras
+REGISTRO: registra / no registra / irregular, y el motivo con sus palabras; si conto de palabra que comio, va aqui
 BARRERAS: que le dificulta (tiempo, pena de las fotos, no sabe usar WhatsApp, ya se comio el plato, enfermedad, cansancio de mensajes)
-SALUD: lo que conto de sintomas, citas, medicamentos o examenes
-SITUACION_PERSONAL: lo que conto de su vida (vive solo, duelo, familia lejos, se siente abandonado, preocupaciones), con sus palabras y sin nombres
+SALUD: lo que conto de sintomas, citas, medicamentos o examenes (la comida NO va aqui)
+SITUACION_PERSONAL: SOLO si conto algo que le pesa o le cambio la vida (vive solo, duelo, familia lejos, se siente abandonado, un familiar enfermo, problemas de dinero, una emergencia en casa), con sus palabras y sin nombres. La rutina (trabajo, gimnasio, oficios) NO va aqui
 COMPROMISO: lo que el paciente dijo que haria, y cuando
 PROMESA_ANDREA: lo que Andrea ofrecio o prometio (mensaje, visita, nueva llamada)
 PREFERENCIAS: horario para llamar, trato, quien le ayuda con el celular
@@ -94,6 +98,12 @@ def clean_memory(text: str | None) -> str | None:
         return None
     text = _LONG_NUMBER.sub("[numero]", text)
     lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+    # se le pide omitir las lineas vacias y aun asi escribe "SALUD: sin informacion"
+    lines = [l for l in lines if not _EMPTY_VALUE.search(l)]
+    # el modelo se pasa del tope que se le pide: cortar por lineas ENTERAS, porque
+    # una etiqueta a medias ("EVITAR: n") le llega a Andrea como dato
+    while len(lines) > 1 and len("\n".join(lines)) > MEMORY_MAX_CHARS:
+        lines.pop()
     return "\n".join(lines)[:MEMORY_MAX_CHARS] or None
 
 
