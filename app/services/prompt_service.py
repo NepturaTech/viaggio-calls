@@ -16,7 +16,7 @@ DEFAULT_SYSTEM_PROMPT = """Eres Andrea, una asistente telefonica automatizada pa
 - Habla de forma clara y breve.
 - No inventes datos. Usa solo la informacion entregada por el sistema.
 - Si falta informacion, dilo con naturalidad: "en este momento no tengo ese dato disponible" o "eso pertenece a otra area y no lo tengo cargado aqui".
-- Si el usuario se sale del flujo o pregunta temas no relacionados con el seguimiento de salud del proyecto, redirigelo con amabilidad: "eso esta fuera de lo que puedo ayudarte aqui, pero con gusto continuamos con el seguimiento. ¿Como te has sentido?"
+- Si el usuario pregunta por temas que no tienen nada que ver con el ni con el proyecto (politica, tramites de otra entidad, ventas), dile con amabilidad que eso no lo manejas y sigue con la llamada. OJO: lo que el paciente cuente de SU vida, su animo, su familia o su salud NUNCA es "salirse del tema": ver "Cuando el paciente se abre".
 - No prometas acciones no confirmadas.
 - Pide confirmacion antes de ejecutar cambios.
 - NUNCA digas que vas a transferir, comunicar o derivar al usuario con un humano, agente, asesor o persona. No existe esa opcion en esta llamada.
@@ -63,6 +63,81 @@ IDENTITY_CONFIRMED_PATTERN = re.compile(
     r"a\s+la\s+orden|con\s+la\s+misma)\b",
     re.IGNORECASE,
 )
+
+
+# ── Cuando el paciente se abre ───────────────────────────────────────────────
+# Medido el 21-sep sobre 163 transcripts: ante un duelo, falta de plata o una ida a
+# urgencias, Andrea respondia "Entiendo... Pero mira... ¿me mandas la foto?" (9
+# llamadas, 12 veces). El bloque del prompt solo no alcanza (prompt contra prompt
+# no se gana), asi que la nota se inyecta por turno, como la de FOOD_SENT_CLAIM.
+# ponytail: regex; si se queda corto, clasificar el turno con Haiku en paralelo.
+DISCLOSURE_PATTERN = re.compile(
+    r"(se\s+(me\s+)?muri[oó]|falleci[oó]|perd[ií]\s+a\s+mi\b|velorio|de\s+luto|\bduelo\b"
+    r"|viv[oe]\s+sol[ao]\b|(estoy|me\s+siento|me\s+dejaron|qued[eé])\s+(muy\s+|tan\s+)?sol[ao]\b"
+    r"|abandonad[ao]|me\s+abandon|no\s+tengo\s+(a\s+)?nadie|nadie\s+me\s+(visita|llama|ayuda|acompa)"
+    r"|mis\s+hijos\s+(se\s+fueron|no\s+(me\s+)?(llaman|visitan|vienen))"
+    r"|\btriste|deprimid|depresi[oó]n|\bllor(o|ando|[eé])\b|angusti|desesperad|sin\s+ganas\s+de"
+    r"|no\s+(puedo|he\s+podido)\s+dormir|cansad[ao]\s+de\s+(la\s+vida|todo|vivir)"
+    r"|no\s+tengo\s+(ni\s+)?(plata|dinero|con\s+qu[eé])|sin\s+(plata|trabajo|empleo)\b|no\s+(me\s+)?alcanza\s+(la\s+plata|para)"
+    r"|no\s+he\s+podido\s+trabajar|qued[eé]\s+sin\s+trabajo"
+    r"|hospitalizad|por\s+urgencias|en\s+(la\s+)?uci\b|c[aá]ncer|me\s+operaron|operaron\s+a\s+mi"
+    r"|est[aá]\s+muy\s+(grave|enferm[ao])|estoy\s+muy\s+enferm[ao]|cuidando\s+a\s+mi"
+    r"|momento\s+(muy\s+|tan\s+)?(dif[ií]cil|cr[ií]tico|duro))",
+    re.IGNORECASE,
+)
+
+# Falso positivo aceptado a proposito: ante la duda, Andrea pregunta como esta.
+CRISIS_PATTERN = re.compile(
+    r"(no\s+quiero\s+(seguir\s+)?viv(ir|iendo)|(me\s+)?qui(ero|siera)\s+morir(me)?|mejor\s+(me\s+)?muero"
+    r"|matarme|quitarme\s+la\s+vida|suicid|no\s+vale\s+la\s+pena\s+vivir"
+    r"|acabar\s+con\s+(mi\s+vida|todo)|para\s+qu[eé]\s+(sigo\s+)?viv)",
+    re.IGNORECASE,
+)
+
+DISCLOSURE_QUIET_TURNS = 2  # respuestas SIGUIENTES a la apertura en las que tampoco se pide la foto
+CRISIS_QUIET_TURNS = 6
+
+DISCLOSURE_NOTE = (
+    "\n\n[NOTA DEL SISTEMA: el paciente se acaba de abrir con algo personal que le pesa. ESE es el tema "
+    "ahora. Nombra lo que dijo con sus palabras y hazle UNA pregunta abierta sobre eso. En esta respuesta "
+    "NO pidas la foto, NO hables del registro, de Viaggio ni de la app, NO digas 'pero mira' y NO digas "
+    "que eso esta fuera de lo que puedes ayudar.]"
+)
+DISCLOSURE_FOLLOWUP_NOTE = (
+    "\n\n[NOTA DEL SISTEMA: hace un momento el paciente conto algo personal. Sigue en ese tema o en el "
+    "que el traiga. En esta respuesta NO pidas la foto ni hables del registro, salvo que EL lo pida.]"
+)
+# ponytail: 123 es la linea nacional de emergencias. La linea de salud mental que
+# deba decirse la define el equipo clinico: va en CRISIS_HELPLINE_TEXT del .env.
+CRISIS_NOTE = (
+    "\n\n[NOTA DEL SISTEMA - RIESGO: el paciente dijo algo que puede ser una idea de hacerse daño o de no "
+    "querer vivir. Deja TODO lo del registro: no se vuelve a hablar de fotos en esta llamada. Tomalo en "
+    "serio, sin alarmarte ni regañar: dile que te importa lo que acaba de decir y preguntale con calma si "
+    "esta pensando en hacerse daño y si hay alguien con el en este momento. Animalo a contarle HOY a "
+    "alguien de confianza y a su medico. Si hay peligro ahora mismo, que el o un familiar llame a la linea "
+    "de emergencias 123.{helpline} No des consejos, no minimices, no prometas que alguien del proyecto lo "
+    "llamara, y no cuelgues tu: quedate hasta que el quiera cerrar.]"
+)
+
+
+def is_crisis(user_text: str) -> bool:
+    return bool(CRISIS_PATTERN.search(user_text or ""))
+
+
+def emotional_note(user_text: str, quiet_left: int, helpline: str = "") -> tuple[str, int]:
+    """Nota para ESTE turno del modelo y cuantos turnos de silencio-de-foto quedan.
+
+    Es estado de la llamada, no del prompt: quien llama guarda `quiet_left`.
+    """
+    text = user_text or ""
+    if CRISIS_PATTERN.search(text):
+        extra = f" {helpline.strip()}" if helpline.strip() else ""
+        return CRISIS_NOTE.format(helpline=extra), CRISIS_QUIET_TURNS
+    if DISCLOSURE_PATTERN.search(text):
+        return DISCLOSURE_NOTE, DISCLOSURE_QUIET_TURNS
+    if quiet_left > 0:
+        return DISCLOSURE_FOLLOWUP_NOTE, quiet_left - 1
+    return "", 0
 
 
 def build_call_intro(
@@ -607,6 +682,32 @@ def build_context_prompt(
         "- Si el usuario pregunta quién fue el visitador, usa los datos de la sección 'Visita de campo (Huella)' para responder con el nombre y rol del visitador registrado.\n"
         "- Si Huella no tiene datos cargados, responde con honestidad: 'No tengo registros de visita disponibles en este momento, pero el equipo del proyecto tiene esa información.'\n"
       )
+
+    # ── Cuando el paciente se abre ───────────────────────────────────────────
+    # Va en TODOS los guiones. Refuerzo determinista por turno: emotional_note().
+    context += (
+        "\n## Cuando el paciente se abre (tiene prioridad sobre el objetivo de la llamada)\n"
+        "Si cuenta algo que le pesa (una muerte, una enfermedad suya o de un familiar, que vive solo "
+        "o se siente abandonado, que no tiene plata, que esta triste o no duerme), ESO pasa a ser el "
+        "tema de la llamada.\n"
+        "- Quedate ahi. Primero nombra lo que dijo con SUS palabras ('se murio tu papa y ademas estas "
+        "pendiente de tu mama'). No digas 'entiendo perfectamente'.\n"
+        "- Luego UNA pregunta abierta sobre eso ('¿como has estado con todo esto?', '¿quien te "
+        "acompaña en estos dias?'). Escucha y sigue ahi uno o dos turnos mas.\n"
+        "- PROHIBIDO en tus dos respuestas siguientes: 'pero mira', pedir la foto, hablar del "
+        "registro, de Viaggio o de la app.\n"
+        "- PROHIBIDO decir 'eso esta fuera de lo que puedo ayudarte': escuchar SI es algo que haces.\n"
+        "- Sin consejos medicos, sin frases hechas ('todo pasa', 'hay que ser fuerte') y sin "
+        "minimizar ('no es complicado').\n"
+        "- Solo vuelves al registro si el PACIENTE vuelve a el. Si no, cierra sin pedir nada: "
+        "'gracias por contarme; hoy no te pido nada del registro, lo importante es que estes bien. "
+        "Te llamamos otro dia.'\n"
+        "- Si lo que cuenta es falta de plata para comer o para un examen: no pidas fotos de comida "
+        "en esta llamada.\n"
+        "- Sintomas serios (urgencias, mareos fuertes, dolor en el pecho): ademas de escuchar, aplica "
+        "la salvaguarda clinica de la guia del proyecto.\n"
+        "- Si recibes una [NOTA DEL SISTEMA] sobre esto, obedecela: manda sobre cualquier guion.\n"
+    )
 
     # ── Objeciones reales al registro de comidas ─────────────────────────────
     # Redactado desde 38 transcripts de llamadas reales (08-17 a 08-21). El

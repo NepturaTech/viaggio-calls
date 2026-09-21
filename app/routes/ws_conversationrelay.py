@@ -27,6 +27,8 @@ from app.services.prompt_service import (
     format_legal_notice,
     build_call_intro,
     build_context_prompt,
+    emotional_note,
+    is_crisis,
 )
 from app.config import get_settings as _get_settings
 from app.services.audio_archive_service import CallAudioArchive
@@ -40,7 +42,7 @@ from app.services.supabase_rest_service import (
 )
 from app.services.twilio_service import hangup_call, start_call_recording
 from app.services.manychat_service import trigger_lost_contact_flow
-from app.services.call_memory_service import schedule_call_memory
+from app.services.call_memory_service import patch_call_log_base, schedule_call_memory
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,10 @@ class ConversationSession:
         self.patient_id: str | None = None
         self.call_sid: str | None = None
         self.pending_hangup: bool = False
+        # Respuestas que faltan sin pedir la foto tras una apertura (emotional_note)
+        self.quiet_turns: int = 0
+        self.crisis_flagged: bool = False
+        self.realtime_note: str = ""
         self.script_name: str = "default"
         self.initial_greeting_completed: bool = False
         self.violation_count: int = 0
@@ -110,6 +116,40 @@ class ConversationSession:
 
     def add_assistant_message(self, text: str):
         self.conversation_history.append({"role": "assistant", "content": text})
+
+
+def _emotional_turn_note(session: "ConversationSession", user_text: str) -> str:
+    """Nota de apertura/riesgo para este turno. Si es riesgo, deja la bandera.
+
+    La bandera es lo unico que existe hoy para el equipo humano: `action_taken =
+    'ALERTA_CRISIS'` en viaggio.call_logs + log CRITICAL. No hay notificacion.
+    """
+    note, session.quiet_turns = emotional_note(
+        user_text, session.quiet_turns, _get_settings().crisis_helpline_text
+    )
+    if note and is_crisis(user_text) and not session.crisis_flagged:
+        session.crisis_flagged = True
+        logger.critical("ALERTA_CRISIS call=%s paciente=%s", session.call_sid, session.patient_id)
+        if session.call_id:
+            log_call_event(session.call_id, "crisis_alert", {"text": user_text})
+        if session.call_sid:
+            async def _flag(call_sid=session.call_sid):
+                try:
+                    ok = await asyncio.to_thread(
+                        patch_call_log_base, call_sid, {"action_taken": "ALERTA_CRISIS"}
+                    )
+                    logger.critical("ALERTA_CRISIS marcada en call_logs=%s call=%s", ok, call_sid)
+                except Exception as exc:
+                    logger.error("ALERTA_CRISIS no se pudo marcar call=%s: %s", call_sid, exc)
+            _task = asyncio.create_task(_flag())
+            _BACKGROUND.add(_task)
+            _task.add_done_callback(_BACKGROUND.discard)
+    elif note:
+        logger.info("Paciente se abre: nota inyectada (quedan=%d) call=%s", session.quiet_turns, session.call_sid)
+    return note
+
+
+_BACKGROUND: set = set()
 
 
 # Afirmaciones tipo "ya lo envié / ya la mandé / ya agregué / acabo de subir la foto".
@@ -777,6 +817,10 @@ async def conversation_relay_ws(websocket: WebSocket):
                         )
                     # ─────────────────────────────────────────────────────────
 
+                    # ── El paciente se abre / riesgo ─────────────────────────
+                    # Va al final para que mande sobre las notas de arriba.
+                    _model_input += _emotional_turn_note(session, user_text)
+
                     # ── Streaming de respuesta Claude ────────────────────────
                     # Enviamos tokens a Twilio conforme Claude los genera.
                     # ElevenLabs empieza a sintetizar voz con los primeros tokens
@@ -999,7 +1043,9 @@ async def realtime_media_ws(websocket: WebSocket):
                         if archive is not None and session.patient_id:
                             archive.patient_id = session.patient_id
                         if openai_ws is not None:
-                            await update_session_instructions(openai_ws, session.system_prompt)
+                            await update_session_instructions(
+                                openai_ws, (session.system_prompt or "") + session.realtime_note
+                            )
                             logger.info(
                                 "Contexto completo enviado a Realtime (call=%s, chars=%d)",
                                 call_sid, len(session.system_prompt or ""),
@@ -1167,6 +1213,15 @@ async def realtime_media_ws(websocket: WebSocket):
                         mark_human_turn(session.call_sid)
                     session.add_user_message(transcript)
                     session.pending_hangup = _should_end_call(transcript)
+                    # ponytail: en voz-a-voz la transcripcion llega cuando la respuesta
+                    # ya arranco, asi que la nota no alcanza ESTE turno (ese lo cubre el
+                    # bloque del prompt): entra por session.update y rige los siguientes.
+                    _note = _emotional_turn_note(session, transcript)
+                    if _note != session.realtime_note:
+                        session.realtime_note = _note
+                        await update_session_instructions(
+                            openai_ws, (session.system_prompt or "") + _note
+                        )
                     if session.call_id:
                         log_call_event(session.call_id, "user_speech", {"text": transcript})
                         append_transcript_line(session.call_id, "user", transcript)

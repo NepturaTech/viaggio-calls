@@ -115,6 +115,10 @@ def clean_memory(text: str | None) -> str | None:
 
 
 def _patch_memoria(call_sid: str, memoria: str) -> bool:
+    return patch_call_log_base(call_sid, {"memoria": memoria})
+
+
+def patch_call_log_base(call_sid: str, updates: dict) -> bool:
     """Escribe en la tabla BASE `viaggio.call_logs` y exige que vuelva la fila.
 
     No sirve `_patch_log_row`: apunta a `public.call_logs`, que es una VISTA con
@@ -136,7 +140,7 @@ def _patch_memoria(call_sid: str, memoria: str) -> bool:
             endpoint,
             headers=headers,
             params={"call_sid": f"eq.{call_sid}", "select": "call_sid"},
-            content=json.dumps({"memoria": memoria}, ensure_ascii=False),
+            content=json.dumps(updates, ensure_ascii=False),
         )
         resp.raise_for_status()
         return bool(resp.json())  # [] = ninguna fila con ese call_sid

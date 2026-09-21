@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     audio_storage_bucket: str = "audio-recordings"
 
+    # Linea de salud mental que Andrea dice si detecta riesgo (la define el equipo
+    # clinico). Vacio = solo se menciona la linea de emergencias 123.
+    crisis_helpline_text: str = ""
+
     # App
     app_env: str = "production"
     app_host: str = "0.0.0.0"
